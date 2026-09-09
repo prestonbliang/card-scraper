@@ -1,0 +1,147 @@
+"""FastAPI service.
+
+Local-first by default: binds to 127.0.0.1, no auth, no telemetry. If you ever
+expose this beyond localhost, put auth in front of it and re-read the license
+of every source in your index first -- "I built a search engine over camp files"
+and "I republished camp files" are different acts and only one of them is
+clearly fine.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+
+from ..graph.relate import build_all
+from ..index.search import SearchEngine
+from ..index.store import Store
+
+WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))), "web")
+
+
+def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
+    app = FastAPI(title="cardgraph", version="0.1.0")
+    app.add_middleware(
+        CORSMiddleware, allow_origins=["http://127.0.0.1:8000", "http://localhost:8000"],
+        allow_methods=["GET"], allow_headers=["*"],
+    )
+
+    store = Store(db_path)
+    engine = SearchEngine(store)
+
+    @app.on_event("startup")
+    def _warm() -> None:
+        engine.build()
+
+    @app.get("/api/stats")
+    def stats() -> dict:
+        return store.stats()
+
+    @app.get("/api/search")
+    def search(
+        q: str = Query(..., min_length=1),
+        k: int = 25,
+        side: str | None = None,
+        author: str | None = None,
+        year_min: int | None = None,
+        year_max: int | None = None,
+        block: str | None = None,
+        min_read_ratio: float | None = None,
+    ) -> dict:
+        hits = engine.search(q, k=k, side=side, author=author, year_min=year_min,
+                             year_max=year_max, block=block,
+                             min_read_ratio=min_read_ratio)
+        return {"query": q, "count": len(hits), "hits": [h.to_dict() for h in hits]}
+
+    @app.get("/api/card/{card_id}")
+    def card(card_id: str) -> dict:
+        row = store.card(card_id)
+        if not row:
+            raise HTTPException(404, "no such card")
+        row["path"] = json.loads(row.pop("path_json") or "[]")
+        row["warrant_flags"] = json.loads(row.get("warrant_flags") or "[]")
+        row["similar"] = [h.to_dict() for h in engine.similar(card_id, k=6)]
+        dupes = store.conn.execute(
+            """SELECT dst_node_id AS other, confidence, evidence FROM edges
+               WHERE kind='duplicates' AND src_node_id=?
+               UNION
+               SELECT src_node_id AS other, confidence, evidence FROM edges
+               WHERE kind='duplicates' AND dst_node_id=?""",
+            (card_id, card_id)).fetchall()
+        row["duplicates"] = [dict(d) for d in dupes]
+        return row
+
+    @app.get("/api/tree")
+    def tree(parent: str | None = None) -> dict:
+        return {"nodes": store.tree(parent)}
+
+    @app.get("/api/node/{node_id}")
+    def node(node_id: str) -> dict:
+        rows = store.cards_for_node(node_id)
+        for r in rows:
+            r["path"] = json.loads(r.pop("path_json") or "[]")
+            r["warrant_flags"] = json.loads(r.get("warrant_flags") or "[]")
+        meta = store.conn.execute("SELECT * FROM nodes WHERE node_id=?",
+                                  (node_id,)).fetchone()
+        if not meta:
+            raise HTTPException(404, "no such node")
+        m = dict(meta)
+        m["path"] = json.loads(m.pop("path_json") or "[]")
+        return {"node": m, "cards": rows, "edges": store.edges_for(node_id),
+                "children": store.tree(node_id)}
+
+    # ---- analysis --------------------------------------------------------
+    # A model-backed run costs money and takes minutes, so the report is
+    # persisted and served from disk. The UI never triggers one implicitly;
+    # ?refresh=1 is the only way to spend anything, and it is a POST.
+    analysis_path = os.path.join(os.path.dirname(db_path) or ".",
+                                 "analysis.json")
+
+    @app.get("/api/analysis")
+    def get_analysis() -> dict:
+        if not os.path.exists(analysis_path):
+            return {"available": False,
+                    "hint": "run `cardgraph analyze --json data/analysis.json`, "
+                            "or POST /api/analysis/run"}
+        with open(analysis_path) as fh:
+            payload = json.load(fh)
+        payload["available"] = True
+        payload["generated_at"] = os.path.getmtime(analysis_path)
+        return payload
+
+    @app.post("/api/analysis/run")
+    def run_analysis(top: int = 6, llm: bool = True,
+                     blocks: bool = True) -> dict:
+        from ..analysis import analyze
+        report = analyze(store, max_positions=top, use_llm=llm,
+                         generate_blocks=blocks, engine=engine)
+        payload = report.to_dict()
+        with open(analysis_path, "w") as fh:
+            json.dump(payload, fh, indent=2)
+        payload["available"] = True
+        return payload
+
+    @app.get("/api/analysis/kinds")
+    def analysis_kinds() -> dict:
+        from ..analysis import KINDS
+        return {"kinds": KINDS}
+
+    @app.post("/api/graph/rebuild")
+    def rebuild() -> dict:
+        result = build_all(store)
+        engine.build()
+        return result
+
+    @app.get("/")
+    def index() -> FileResponse:
+        return FileResponse(os.path.join(WEB_DIR, "index.html"))
+
+    return app
+
+
+app = create_app()

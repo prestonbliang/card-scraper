@@ -1,0 +1,117 @@
+# Argument skeleton: US moratorium on hyperscale data center construction
+#
+# This file is STRUCTURE ONLY. There are no card bodies in it, deliberately.
+#
+# Writing plausible-looking quotations and attributing them to Blackhurst,
+# Ember, Goldman Sachs or anyone else would produce documents indistinguishable
+# from real evidence the moment they left this repo, and cut-evidence integrity
+# is the one thing a debate tool must not erode. So the outline is here and the
+# cards are yours to paste in.
+#
+# Use it two ways:
+#   python -m seed.build_outline seed/moratorium_outline.yaml data/corpus/moratorium.docx
+#     -> an empty Verbatim-shaped .docx with the headings already correct;
+#        paste your real cards under the right tags and re-ingest.
+#   Or just read it as a checklist of what the file is missing.
+#
+# `sources` names authors you have already worked with on this resolution.
+# They are pointers for where to go cut, not claims about what those authors say.
+
+resolution: >
+  Resolved: The United States federal government should enact a moratorium on
+  the construction of new hyperscale data centers.
+
+sides:
+
+  aff:
+    pockets:
+      - title: Ratepayer Harm Advantage
+        hats:
+          - title: 1AC
+            blocks:
+              - title: Contention One -- Ratepayer Harm
+                tags:
+                  - Large-load interconnection shifts network upgrade costs onto the general rate base
+                  - The transfer is regressive -- volumetric residential rate design lands it on low-income households
+                  - Rate base growth compounds across cycles
+                  - Impact -- energy burden and utility disconnection
+                sources: [Blackhurst, Henneman et al.]
+              - title: Contention Two -- Fossil Lock-In
+                tags:
+                  - Round-the-clock procurement for large loads is firmed by existing gas capacity
+                  - Retirement deferrals push emissions inside the transition window
+                  - New gas buildout is being justified by projected load that may not materialize
+                  - Impact -- locked-in emissions vs. stated decarbonization pathways
+                sources: [Ember, Hoffmann/Allianz]
+              - title: Solvency
+                tags:
+                  - A construction moratorium halts new interconnection requests at the source
+                  - Federal action is necessary -- state-by-state siting produces leakage
+                  - Moratorium is reversible; built generation is not
+
+          - title: 2AC
+            blocks:
+              - title: "AT: Economic Contraction"
+                tags:
+                  - Construction employment is transitional, not permanent -- operating headcount is small
+                  - Capital reallocates rather than disappearing
+                  - Contraction estimates assume a counterfactual buildout that forecasts do not support
+                sources: [Goldman Sachs, Synergy Research]
+              - title: "AT: Grid Cost DA"
+                tags:
+                  - Cost-allocation reform is codified in tariffs and survives a demand pause
+                  - No link -- the reform's driver is the regulatory record, not pending requests
+              - title: "AT: Innovation / Competitiveness"
+                tags:
+                  - Compute capacity is not the binding constraint on frontier progress
+                  - Efficiency gains substitute for raw buildout
+                sources: [Stanford HAI]
+
+  neg:
+    pockets:
+      - title: Economic Contraction DA
+        hats:
+          - title: 1NC
+            blocks:
+              - title: Uniqueness
+                tags:
+                  - Data center construction is currently a load-bearing share of nonresidential investment
+                  - Regional construction employment depends on the current pipeline
+                sources: [Goldman Sachs, Synergy Research]
+              - title: Link
+                tags:
+                  - A federal moratorium cancels announced projects, not just marginal ones
+                  - Supply chain and trades capacity does not idle -- it exits
+              - title: Internal Link
+                tags:
+                  - Nonresidential construction contraction propagates through regional multipliers
+              - title: Impact
+                tags:
+                  - Regional recession in the metros carrying the buildout
+                  - Fiscal impact -- property tax base concentration
+          - title: Block
+            blocks:
+              - title: "AT: Ratepayer Harm"
+                tags:
+                  - Harm studies do not control for fuel-cost pass-through
+                  - Cost allocation is already shifting to the requesting customer
+                  - Turn -- large loads improve system load factor and spread fixed costs
+                sources: [Blackhurst]
+              - title: "AT: Fossil Lock-In"
+                tags:
+                  - Large buyers are the main source of new clean firm procurement
+                  - Turn -- moratorium freezes the clean procurement pipeline with it
+                sources: [Ember]
+
+      - title: Innovation / Competitiveness DA
+        hats:
+          - title: 1NC
+            blocks:
+              - title: Link
+                tags:
+                  - Domestic compute capacity constrains frontier model training
+                  - Moratorium relocates buildout offshore rather than preventing it
+                sources: [Stanford HAI]
+              - title: Impact
+                tags:
+                  - Competitiveness and standard-setting

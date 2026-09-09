@@ -1,0 +1,24 @@
+# core
+python-docx>=1.1
+lxml>=5.0
+fastapi>=0.110
+uvicorn[standard]>=0.27
+scikit-learn>=1.4
+numpy>=1.26
+pyyaml>=6.0
+
+# optional fetch layer (Scrapling). Without these, fetching falls back to urllib.
+scrapling>=0.4
+curl_cffi>=0.7
+patchright>=1.40
+browserforge>=1.2
+
+# optional: model-backed analysis. Without either of these, `analyze` still
+# runs its deterministic checks. The `claude` CLI needs no API key.
+anthropic>=0.40
+
+# optional: OpenDebateEvidence ingest
+datasets>=2.19
+
+# dev
+pytest>=8.0

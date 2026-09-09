@@ -1,0 +1,24 @@
+[project]
+name = "cardgraph"
+version = "0.1.0"
+description = "Local-first search, browse and adversarial analysis over debate evidence"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+  "python-docx>=1.1", "lxml>=5.0", "fastapi>=0.110",
+  "uvicorn[standard]>=0.27", "scikit-learn>=1.4", "numpy>=1.26", "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+fetch = ["scrapling>=0.4", "curl_cffi>=0.7", "patchright>=1.40", "browserforge>=1.2"]
+llm = ["anthropic>=0.40"]
+datasets = ["datasets>=2.19"]
+dev = ["pytest>=8.0"]
+all = ["scrapling>=0.4", "curl_cffi>=0.7", "patchright>=1.40",
+       "browserforge>=1.2", "anthropic>=0.40", "datasets>=2.19", "pytest>=8.0"]
+
+[project.scripts]
+cardgraph = "cardgraph.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

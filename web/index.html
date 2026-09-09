@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cardgraph</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Crect width=%2716%27 height=%2716%27 rx=%273%27 fill=%27%232f5d50%27/%3E%3Crect x=%273%27 y=%275%27 width=%2710%27 height=%272%27 fill=%27%23fff3bf%27/%3E%3Crect x=%273%27 y=%279%27 width=%276%27 height=%272%27 fill=%27%23fff3bf%27/%3E%3C/svg%3E">
+<style>
+:root{
+  --bg:#fbfbfa; --panel:#fff; --ink:#1a1a19; --muted:#6b6b66; --line:#e3e2de;
+  --accent:#2f5d50; --accent-soft:#e8f0ed; --read:#fff3bf; --emph:#ffd43b;
+  --aff:#2f5d50; --neg:#8a3324; --warn:#9a6700; --warn-bg:#fff8e1;
+  --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
+  --serif:"Iowan Old Style","Palatino Linotype",Georgia,serif;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme=light]){
+    --bg:#16171a; --panel:#1d1f23; --ink:#e8e6e3; --muted:#9a9791; --line:#2e3137;
+    --accent:#7fb3a1; --accent-soft:#22302b; --read:#3d3517; --emph:#5c4d10;
+    --aff:#7fb3a1; --neg:#d99177; --warn:#d9a441; --warn-bg:#2b2410;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 var(--sans)}
+a{color:var(--accent)}
+button{font:inherit;cursor:pointer}
+
+header{
+  display:flex;align-items:center;gap:16px;padding:12px 18px;
+  border-bottom:1px solid var(--line);background:var(--panel);
+  position:sticky;top:0;z-index:10;flex-wrap:wrap;
+}
+.brand{font-weight:700;letter-spacing:-.02em;font-size:16px}
+.brand span{color:var(--muted);font-weight:400;font-size:12px;margin-left:8px}
+.searchwrap{flex:1;min-width:260px;display:flex;gap:8px}
+input[type=search],select{
+  font:inherit;padding:8px 11px;border:1px solid var(--line);border-radius:7px;
+  background:var(--bg);color:var(--ink);
+}
+input[type=search]{flex:1}
+input[type=search]:focus,select:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
+.stats{font-size:12px;color:var(--muted);font-family:var(--mono);white-space:nowrap}
+
+main{display:grid;grid-template-columns:300px 1fr;gap:0;min-height:calc(100vh - 58px)}
+@media(max-width:900px){main{grid-template-columns:1fr}#tree{display:none}}
+
+#tree{border-right:1px solid var(--line);padding:14px 10px;overflow-y:auto;
+      max-height:calc(100vh - 58px);position:sticky;top:58px;background:var(--panel)}
+.treehdr{font-size:11px;text-transform:uppercase;letter-spacing:.09em;
+         color:var(--muted);padding:0 8px 8px;font-weight:600}
+.node{padding:4px 8px;border-radius:6px;cursor:pointer;display:flex;gap:6px;
+      align-items:baseline;line-height:1.35}
+.node:hover{background:var(--accent-soft)}
+.node.sel{background:var(--accent-soft);font-weight:600}
+.twisty{width:12px;flex:none;color:var(--muted);font-size:10px;user-select:none}
+.node .ttl{flex:1;overflow:hidden;text-overflow:ellipsis}
+.node .cnt{font-family:var(--mono);font-size:11px;color:var(--muted)}
+.kids{margin-left:12px;border-left:1px solid var(--line);padding-left:4px}
+.at-node .ttl{color:var(--neg)}
+
+#content{padding:20px 24px;max-width:900px}
+body.analysis #content{max-width:1180px}
+.crumb{font-size:12px;color:var(--muted);margin-bottom:14px;font-family:var(--mono)}
+.empty{color:var(--muted);padding:40px 0;max-width:56ch}
+.empty h2{font-size:15px;color:var(--ink);margin:0 0 8px}
+
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+      padding:14px 16px;margin-bottom:12px}
+.card h3{margin:0 0 6px;font-size:15px;line-height:1.4;font-weight:650;cursor:pointer}
+.card h3:hover{color:var(--accent)}
+.cite{font-family:var(--mono);font-size:11.5px;color:var(--muted);
+      margin-bottom:9px;word-break:break-word}
+.read{font-family:var(--serif);font-size:15.5px;line-height:1.6;
+      background:var(--read);padding:2px 0;box-decoration-break:clone}
+.readbox{margin:8px 0 0}
+.meta{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center}
+.pill{font-size:11px;font-family:var(--mono);padding:2px 8px;border-radius:99px;
+      border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+.pill.aff{color:var(--aff);border-color:var(--aff)}
+.pill.neg{color:var(--neg);border-color:var(--neg)}
+.pill.flag{color:var(--warn);border-color:var(--warn);background:var(--warn-bg)}
+.pill.rank{background:var(--accent-soft);border-color:transparent;color:var(--accent)}
+
+.detail .body{font-family:var(--serif);font-size:15px;line-height:1.65;
+              color:var(--muted);margin-top:10px}
+.detail .body mark{background:var(--read);color:var(--ink);padding:1px 0}
+.detail .body mark.e{background:var(--emph);font-weight:600}
+.toggle{display:flex;gap:6px;margin:12px 0 4px}
+.toggle button{background:var(--panel);border:1px solid var(--line);
+  border-radius:6px;padding:4px 10px;font-size:12px;color:var(--muted)}
+.toggle button[aria-pressed=true]{background:var(--accent);color:#fff;border-color:var(--accent)}
+h4.sec{font-size:11px;text-transform:uppercase;letter-spacing:.09em;
+       color:var(--muted);margin:22px 0 8px;font-weight:600}
+.edge{padding:7px 10px;border:1px solid var(--line);border-radius:7px;
+      margin-bottom:6px;cursor:pointer;display:flex;justify-content:space-between;gap:10px}
+.edge:hover{background:var(--accent-soft)}
+.edge .conf{font-family:var(--mono);font-size:11px;color:var(--muted)}
+.note{font-size:12px;color:var(--muted);background:var(--warn-bg);
+      border:1px solid var(--warn);border-radius:7px;padding:9px 11px;margin:10px 0}
+.spin{color:var(--muted);padding:20px 0}
+
+/* analysis */
+.modes{display:flex;gap:2px;background:var(--bg);border:1px solid var(--line);
+  border-radius:8px;padding:2px}
+.modes button{background:transparent;border:0;border-radius:6px;padding:5px 12px;
+  font-size:12.5px;color:var(--muted)}
+.modes button[aria-pressed=true]{background:var(--accent);color:#fff}
+.abar{display:flex;gap:18px;flex-wrap:wrap;padding:12px 14px;background:var(--panel);
+  border:1px solid var(--line);border-radius:10px;margin-bottom:16px}
+.astat{display:flex;flex-direction:column;gap:2px}
+.astat b{font-size:19px;font-weight:650;line-height:1.1}
+.astat span{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.pos{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:14px 16px;margin-bottom:14px}
+.pos h3{margin:0 0 3px;font-size:15.5px;font-weight:650}
+.posmeta{font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:10px}
+.bars{display:flex;gap:14px;margin:8px 0 12px;flex-wrap:wrap}
+.bar{flex:1;min-width:150px}
+.bar label{font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.track{height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin-top:4px}
+.fill{height:100%;border-radius:3px}
+.fill.sup{background:var(--aff)} .fill.exp{background:var(--neg)}
+.thesis{font-family:var(--serif);font-size:14.5px;line-height:1.55;
+  border-left:3px solid var(--accent);padding-left:11px;margin:10px 0;color:var(--ink)}
+.verdict{font-size:13.5px;line-height:1.6;background:var(--accent-soft);
+  border-radius:8px;padding:11px 13px;margin:10px 0}
+.chain{margin:12px 0}
+.step{display:flex;gap:10px;padding:7px 9px;border-radius:7px;margin-bottom:4px;
+  align-items:flex-start;border:1px solid transparent}
+.step .st{font-family:var(--mono);font-size:10px;font-weight:700;padding:2px 6px;
+  border-radius:4px;flex:none;margin-top:1px;letter-spacing:.04em}
+.step.supported .st{background:var(--accent-soft);color:var(--accent)}
+.step.weak{background:var(--warn-bg);border-color:var(--warn)}
+.step.weak .st{background:var(--warn);color:#fff}
+.step.missing{background:color-mix(in srgb,var(--neg) 9%,transparent);border-color:var(--neg)}
+.step.missing .st{background:var(--neg);color:#fff}
+.step .claim{flex:1;font-size:13.5px;line-height:1.45}
+.step .note{font-size:12px;color:var(--muted);margin-top:3px}
+.step .cids{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:3px}
+.find{border-left:3px solid var(--line);padding:8px 0 8px 11px;margin:9px 0}
+.find.critical{border-color:#b3261e} .find.major{border-color:var(--neg)}
+.find.minor{border-color:var(--warn)} .find.info{border-color:var(--line)}
+.find .ft{font-weight:600;font-size:13.5px;display:flex;gap:7px;align-items:baseline}
+.find .ft>*:not(.sevtag){flex:1;min-width:0}
+.find .fd{font-size:13px;color:var(--muted);margin-top:3px;line-height:1.5}
+.find .fx{font-size:12.5px;margin-top:5px}
+.find .fx b{color:var(--accent);font-weight:600}
+.sevtag{font-family:var(--mono);font-size:9.5px;text-transform:uppercase;
+  letter-spacing:.07em;padding:1px 6px;border-radius:3px;color:#fff;flex:none}
+.sevtag.critical{background:#b3261e} .sevtag.major{background:var(--neg)}
+.sevtag.minor{background:var(--warn)} .sevtag.info{background:var(--muted)}
+.ungrounded{font-family:var(--mono);font-size:10px;color:var(--warn);
+  border:1px solid var(--warn);border-radius:3px;padding:0 5px}
+.blk{background:var(--panel);border:1px solid var(--line);border-radius:9px;
+  padding:12px 14px;margin-bottom:10px}
+.blk h4{margin:0 0 5px;font-size:14px;font-weight:650}
+.blk .arg{font-size:13px;line-height:1.5;color:var(--muted)}
+.cov{font-family:var(--mono);font-size:10.5px;padding:2px 8px;border-radius:99px;
+  display:inline-block;margin-top:8px}
+.cov.none{background:color-mix(in srgb,var(--neg) 14%,transparent);color:var(--neg)}
+.cov.partial{background:var(--warn-bg);color:var(--warn);border:1px solid var(--warn)}
+.cov.have{background:var(--accent-soft);color:var(--accent)}
+.q{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-top:6px;
+  word-break:break-word}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">cardgraph<span>debate evidence index</span></div>
+  <div class="searchwrap">
+    <input type="search" id="q" placeholder="Search read text — try an argument, not a keyword" autocomplete="off">
+    <select id="side">
+      <option value="">any side</option><option value="aff">aff</option>
+      <option value="neg">neg</option><option value="unknown">unclassified</option>
+    </select>
+  </div>
+  <div class="modes">
+    <button id="mSearch" aria-pressed="true">Search</button>
+    <button id="mAnalysis" aria-pressed="false">Analysis</button>
+  </div>
+  <div class="stats" id="stats"></div>
+</header>
+
+<main>
+  <nav id="tree"><div class="treehdr">Contentions &amp; blocks</div><div id="treebody"></div></nav>
+  <section id="content"></section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const el = (t, c, x) => { const n = document.createElement(t); if (c) n.className = c;
+  if (x !== undefined) n.textContent = x; return n; };
+const esc = s => (s||"").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const api = async (p) => (await fetch(p)).json();
+
+/* ---------- read-text reconstruction -------------------------------------
+   We store body and read_text separately, joined by an elision marker. To show
+   the card the way a debater sees it, locate each read fragment inside the body
+   and mark it. Fragments are matched on normalized whitespace; a fragment that
+   does not locate is appended rather than dropped, so nothing is silently lost.
+------------------------------------------------------------------------- */
+function renderBodyWithMarks(body, readText, emphText){
+  if (!body) return esc(readText || "");
+  if (!readText) return esc(body);
+  const frags = readText.split(" … ").map(f => f.trim()).filter(f => f.length > 8);
+  const emph  = new Set((emphText||"").split(" … ").map(f => f.trim()).filter(Boolean));
+  const spans = [];
+  let cursor = 0;
+  for (const f of frags){
+    const at = body.indexOf(f, cursor);
+    if (at === -1) continue;
+    spans.push([at, at + f.length, emph.has(f)]);
+    cursor = at + f.length;
+  }
+  if (!spans.length) return esc(body);
+  let out = "", pos = 0;
+  for (const [s, e, isE] of spans){
+    out += esc(body.slice(pos, s));
+    out += `<mark class="${isE ? 'e' : ''}">${esc(body.slice(s, e))}</mark>`;
+    pos = e;
+  }
+  return out + esc(body.slice(pos));
+}
+
+/* ---------- card rendering ---------- */
+function cardEl(c, opts = {}){
+  const n = el("div", "card");
+  const h = el("h3", null, c.tag);
+  h.onclick = () => showCard(c.card_id);
+  n.append(h);
+  if (c.cite_raw) n.append(el("div", "cite", c.cite_raw));
+  if (c.read_text){
+    const rb = el("div", "readbox");
+    rb.append(el("span", "read", c.read_text));
+    n.append(rb);
+  }
+  const m = el("div", "meta");
+  if (c.side && c.side !== "unknown") m.append(el("span", "pill " + c.side, c.side));
+  if (c.block) m.append(el("span", "pill", c.block));
+  (c.warrant_flags || []).forEach(f => m.append(el("span", "pill flag", f.replace(/_/g," "))));
+  if (opts.rank) m.append(el("span", "pill rank",
+    `lex ${c.lexical_rank ?? "—"} · vec ${c.vector_rank ?? "—"}`));
+  if (m.children.length) n.append(m);
+  return n;
+}
+
+/* ---------- search ---------- */
+let timer;
+$("#q").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(doSearch, 220); });
+$("#side").addEventListener("change", doSearch);
+
+async function doSearch(){
+  const q = $("#q").value.trim();
+  if (!q){ renderWelcome(); return; }
+  const side = $("#side").value;
+  const c = $("#content");
+  c.innerHTML = '<div class="spin">searching…</div>';
+  const r = await api(`/api/search?q=${encodeURIComponent(q)}&k=25` + (side ? `&side=${side}` : ""));
+  c.innerHTML = "";
+  c.append(el("div", "crumb", `${r.count} result${r.count===1?"":"s"} for "${q}"`));
+  if (!r.count){
+    c.append(el("div", "empty", "Nothing matched. Search runs over the read text — the underlined portion — so a phrase that only appears in unread context will not hit."));
+    return;
+  }
+  r.hits.forEach(h => c.append(cardEl(h, { rank: true })));
+}
+
+/* ---------- tree ---------- */
+async function loadTree(parent, container, depth){
+  const r = await api("/api/tree" + (parent ? `?parent=${parent}` : ""));
+  for (const n of r.nodes){
+    const row = el("div", "node" + (/^a\/?t:?\s/i.test(n.title) ? " at-node" : ""));
+    const tw = el("span", "twisty", n.has_children ? "▸" : "");
+    row.append(tw, el("span", "ttl", n.title));
+    if (n.card_count) row.append(el("span", "cnt", n.card_count));
+    container.append(row);
+    const kids = el("div", "kids"); kids.hidden = true; container.append(kids);
+    let loaded = false;
+    row.onclick = async (ev) => {
+      document.querySelectorAll(".node.sel").forEach(x => x.classList.remove("sel"));
+      row.classList.add("sel");
+      if (n.has_children){
+        kids.hidden = !kids.hidden;
+        tw.textContent = kids.hidden ? "▸" : "▾";
+        if (!loaded && !kids.hidden){ loaded = true; await loadTree(n.node_id, kids, depth+1); }
+      }
+      showNode(n.node_id);
+    };
+  }
+}
+
+async function showNode(id){
+  const c = $("#content");
+  c.innerHTML = '<div class="spin">loading…</div>';
+  const r = await api(`/api/node/${id}`);
+  c.innerHTML = "";
+  c.append(el("div", "crumb", (r.node.path.length ? r.node.path.join("  ›  ") : r.node.title)));
+
+  const ans = (r.edges.outgoing || []).filter(e => e.kind === "answers");
+  const answered = (r.edges.incoming || []).filter(e => e.kind === "answers");
+  if (ans.length){
+    c.append(el("h4", "sec", "This block answers"));
+    ans.forEach(e => {
+      const d = el("div", "edge");
+      d.append(el("span", null, e.dst_title || "(unknown)"),
+               el("span", "conf", `match ${e.confidence}`));
+      d.onclick = () => showNode(e.dst_node_id);
+      c.append(d);
+    });
+  }
+  if (answered.length){
+    c.append(el("h4", "sec", `Answered by ${answered.length} block${answered.length===1?"":"s"}`));
+    answered.forEach(e => {
+      const d = el("div", "edge");
+      d.append(el("span", null, e.src_title || "(unknown)"),
+               el("span", "conf", `match ${e.confidence}`));
+      d.onclick = () => showNode(e.src_node_id);
+      c.append(d);
+    });
+  }
+
+  if (r.cards.length){
+    c.append(el("h4", "sec", `${r.cards.length} card${r.cards.length===1?"":"s"}`));
+    r.cards.forEach(cd => c.append(cardEl(cd)));
+  } else if (r.children.length){
+    c.append(el("div", "empty", "No cards directly on this node — open its children in the tree."));
+  }
+}
+
+async function showCard(id){
+  const c = $("#content");
+  c.innerHTML = '<div class="spin">loading…</div>';
+  const d = await api(`/api/card/${id}`);
+  c.innerHTML = "";
+  c.append(el("div", "crumb", d.path.length ? d.path.join("  ›  ") : d.source_id));
+
+  const box = el("div", "card detail");
+  box.append(el("h3", null, d.tag));
+  if (d.cite_raw) box.append(el("div", "cite", d.cite_raw));
+
+  const tg = el("div", "toggle");
+  const bRead = el("button", null, "Read text");
+  const bFull = el("button", null, "Full card");
+  tg.append(bRead, bFull); box.append(tg);
+
+  const view = el("div");
+  const setMode = (mode) => {
+    bRead.setAttribute("aria-pressed", mode === "read");
+    bFull.setAttribute("aria-pressed", mode === "full");
+    view.innerHTML = "";
+    if (mode === "read"){
+      const rb = el("div", "readbox");
+      rb.append(el("span", "read", d.read_text || "(no read text parsed)"));
+      view.append(rb);
+    } else {
+      const b = el("div", "body");
+      b.innerHTML = renderBodyWithMarks(d.body, d.read_text, d.emphasis_text);
+      view.append(b);
+    }
+  };
+  bRead.onclick = () => setMode("read");
+  bFull.onclick = () => setMode("full");
+  box.append(view);
+  setMode("read");
+
+  const m = el("div", "meta");
+  if (d.side && d.side !== "unknown") m.append(el("span", "pill " + d.side, d.side));
+  if (d.cite_year) m.append(el("span", "pill", String(d.cite_year)));
+  m.append(el("span", "pill", `read ${Math.round((d.read_ratio||0)*100)}% of body`));
+  (d.warrant_flags||[]).forEach(f => m.append(el("span","pill flag", f.replace(/_/g," "))));
+  box.append(m);
+  c.append(box);
+
+  if ((d.warrant_flags||[]).length){
+    c.append(el("div", "note",
+      "Flags are prompts to go read the card, not verdicts. They are heuristics and they have false positives."));
+  }
+
+  if (d.duplicates && d.duplicates.length){
+    c.append(el("h4", "sec", "Same evidence elsewhere"));
+    d.duplicates.forEach(x => {
+      let note = "";
+      try { const ev = JSON.parse(x.evidence||"{}"); if (ev.retagged) note = " — re-tagged"; } catch(e){}
+      const row = el("div", "edge");
+      row.append(el("span", null, "overlapping cut" + note),
+                 el("span", "conf", `${Math.round(x.confidence*100)}% overlap`));
+      row.onclick = () => showCard(x.other);
+      c.append(row);
+    });
+  }
+
+  if (d.similar && d.similar.length){
+    c.append(el("h4", "sec", "Makes a similar argument"));
+    d.similar.forEach(s => c.append(cardEl(s)));
+  }
+}
+
+/* ---------- analysis view ---------- */
+let ANALYSIS = null;
+
+function sevTag(sev){ return el("span", "sevtag " + sev, sev); }
+
+function findingEl(f){
+  const n = el("div", "find " + f.severity);
+  const t = el("div", "ft");
+  t.append(sevTag(f.severity), document.createTextNode(f.title));
+  if (f.grounded === false) t.append(el("span", "ungrounded", "ungrounded"));
+  n.append(t);
+  n.append(el("div", "fd", f.detail));
+  if (f.fix){
+    const fx = el("div", "fx");
+    fx.append(el("b", null, "Fix: "), document.createTextNode(f.fix));
+    n.append(fx);
+  }
+  if (f.card_ids && f.card_ids.length){
+    const m = el("div", "meta");
+    f.card_ids.slice(0, 6).forEach(cid => {
+      const p = el("span", "pill", cid.slice(0, 8));
+      p.style.cursor = "pointer";
+      p.onclick = () => { setMode("search"); showCard(cid); };
+      m.append(p);
+    });
+    n.append(m);
+  }
+  return n;
+}
+
+function chainEl(chain){
+  const wrap = el("div", "chain");
+  const label = { supported: "OK", weak: "WEAK", missing: "GAP" };
+  chain.forEach(link => {
+    const row = el("div", "step " + link.status);
+    row.append(el("span", "st", label[link.status] || link.status));
+    const body = el("div", "claim");
+    body.append(document.createTextNode(`${link.step}. ${link.claim}`));
+    if (link.note && link.status !== "supported")
+      body.append(el("div", "note", link.note));
+    if (link.card_ids && link.card_ids.length)
+      body.append(el("div", "cids", link.card_ids.map(c => c.slice(0,8)).join(" · ")));
+    row.append(body);
+    wrap.append(row);
+  });
+  return wrap;
+}
+
+function positionEl(c){
+  const n = el("div", "pos");
+  const h = el("h3", null, c.title);
+  n.append(h);
+  n.append(el("div", "posmeta",
+    `${c.side} · ${c.card_count} cards · ${c.distinct_sources} sources` +
+    (c.newest_year ? ` · ${c.oldest_year}–${c.newest_year}` : "")));
+
+  const bars = el("div", "bars");
+  [["support", c.support_score, "sup"], ["exposure", c.exposure_score, "exp"]]
+    .forEach(([name, val, cls]) => {
+      const b = el("div", "bar");
+      b.append(el("label", null, `${name} ${(val*100).toFixed(0)}%`));
+      const tr = el("div", "track"); const fl = el("div", "fill " + cls);
+      fl.style.width = `${Math.round(val*100)}%`;
+      tr.append(fl); b.append(tr); bars.append(b);
+    });
+  n.append(bars);
+
+  if (c.thesis) n.append(el("div", "thesis", c.thesis));
+  if (c.verdict) n.append(el("div", "verdict", c.verdict));
+  if (c.chain && c.chain.length){
+    n.append(el("h4", "sec", "Internal link chain"));
+    n.append(chainEl(c.chain));
+  }
+  if (c.findings && c.findings.length){
+    n.append(el("h4", "sec", `${c.findings.length} finding${c.findings.length===1?"":"s"}`));
+    c.findings.forEach(f => n.append(findingEl(f)));
+  }
+  return n;
+}
+
+function blockEl(b){
+  const n = el("div", "blk");
+  const h = el("h4", null, b.title);
+  n.append(h);
+  n.append(el("div", "posmeta", `vs ${b.against}`));
+  n.append(el("div", "arg", b.argument));
+  const covText = { none: "not in your files", partial: "possibly related — check first",
+                    have: "you already have cards for this" }[b.coverage] || b.coverage;
+  n.append(el("div", "cov " + b.coverage, covText));
+  if (b.matched_card_ids && b.matched_card_ids.length){
+    const m = el("div", "meta");
+    b.matched_card_ids.forEach((cid, i) => {
+      const sc = (b.match_scores && b.match_scores[i] != null)
+        ? ` ${b.match_scores[i].toFixed(2)}` : "";
+      const p = el("span", "pill", cid.slice(0,8) + sc);
+      p.style.cursor = "pointer";
+      p.onclick = () => { setMode("search"); showCard(cid); };
+      m.append(p);
+    });
+    n.append(m);
+  }
+  if (b.coverage !== "have" && b.search_query){
+    const q = el("div", "q", `go cut: "${b.search_query}"`);
+    q.style.cursor = "pointer";
+    q.onclick = () => { setMode("search"); $("#q").value = b.search_query; doSearch(); };
+    n.append(q);
+  }
+  return n;
+}
+
+async function showAnalysis(){
+  const c = $("#content");
+  c.innerHTML = '<div class="spin">loading analysis…</div>';
+  if (!ANALYSIS) ANALYSIS = await api("/api/analysis");
+  c.innerHTML = "";
+  if (!ANALYSIS.available){
+    const e = el("div", "empty");
+    e.append(el("h2", null, "No analysis has been run yet."));
+    e.append(el("p", null, ANALYSIS.hint || ""));
+    e.append(el("p", null, "A model-backed run costs money and takes a few minutes, so it is never triggered automatically by opening this page."));
+    c.append(e);
+    return;
+  }
+  const s = ANALYSIS.stats || {};
+  const bar = el("div", "abar");
+  const add = (v, l) => { const d = el("div","astat"); d.append(el("b",null,String(v)), el("span",null,l)); bar.append(d); };
+  add(s.positions_analyzed ?? 0, "positions");
+  add(s.critical ?? 0, "critical");
+  add(s.major ?? 0, "major");
+  add(s.blocks_missing ?? 0, "blocks to cut");
+  if (s.grounding) add(`${Math.round(s.grounding.grounded_rate*100)}%`, "grounded");
+  add(ANALYSIS.llm_provider || "none", "model");
+  c.append(bar);
+
+  if (ANALYSIS.llm_usage) c.append(el("div", "crumb", ANALYSIS.llm_usage));
+
+  (ANALYSIS.warnings || []).slice(0, 4).forEach(w =>
+    c.append(el("div", "note", w)));
+
+  if ((ANALYSIS.corpus_findings || []).length){
+    c.append(el("h4", "sec", "Corpus-wide"));
+    ANALYSIS.corpus_findings.forEach(f => c.append(findingEl(f)));
+  }
+
+  c.append(el("h4", "sec", "Positions, worst first"));
+  (ANALYSIS.contentions || []).forEach(p => c.append(positionEl(p)));
+
+  if ((ANALYSIS.generated_blocks || []).length){
+    c.append(el("h4", "sec", "Answers you do not have"));
+    ANALYSIS.generated_blocks.forEach(b => c.append(blockEl(b)));
+  }
+}
+
+let MODE = "search";
+function setMode(m){
+  MODE = m;
+  $("#mSearch").setAttribute("aria-pressed", String(m === "search"));
+  $("#mAnalysis").setAttribute("aria-pressed", String(m === "analysis"));
+  $("#tree").style.display = m === "search" ? "" : "none";
+  document.body.classList.toggle("analysis", m === "analysis");
+  document.querySelector("main").style.gridTemplateColumns =
+    m === "search" ? "300px 1fr" : "1fr";
+  if (m === "analysis") showAnalysis();
+  else if ($("#q").value.trim()) doSearch();
+  else renderWelcome();
+}
+
+function renderWelcome(){
+  const c = $("#content");
+  c.innerHTML = "";
+  const e = el("div", "empty");
+  e.append(el("h2", null, "Search the read text, not the document."));
+  const p1 = el("p", null, "Every card here is indexed on the portion that is actually underlined — what gets spoken in a round — rather than on the full quoted passage. Searching an argument in your own words usually works better than guessing the author's vocabulary.");
+  const p2 = el("p", null, "Or browse the outline on the left. Blocks beginning with “AT:” are linked to what they answer, across every file in the index.");
+  e.append(p1, p2);
+  c.append(e);
+}
+
+(async () => {
+  const s = await api("/api/stats");
+  $("#stats").textContent =
+    `${s.cards} cards · ${s.nodes} nodes · ${s.edges} edges · ${s.sources} sources`;
+  await loadTree(null, $("#treebody"), 0);
+  $("#mSearch").onclick = () => setMode("search");
+  $("#mAnalysis").onclick = () => setMode("analysis");
+  renderWelcome();
+})();
+</script>
+</body>
+</html>
