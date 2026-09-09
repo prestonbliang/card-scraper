@@ -74,6 +74,12 @@ class Card:
     side: Side = Side.UNKNOWN
     # derived
     card_id: str = ""
+    # True when the source only ever disclosed the ends of the card (the
+    # caselist convention) rather than a full body with underlining. Analysis
+    # reads this to suppress read-health findings that would otherwise fire on
+    # every card from an archive ingest -- all true, all useless.
+    disclosed_only: bool = False
+    round_context: str = ""   # "Tournament: X | Round: 3" where known
     emphasis_text: str = ""   # doubly-marked (bold+underline / highlighted)
     read_ratio: float = 0.0   # len(read_text) / len(body)
     warrant_flags: list[str] = field(default_factory=list)

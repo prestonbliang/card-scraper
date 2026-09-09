@@ -52,7 +52,7 @@ Computed:
 | `recency_decay` | position's newest card lags the corpus by 3+ years |
 | `no_read_text` / `thin_read` | nothing underlined, or almost nothing |
 | `answer_gap` | blocks in the index attack this and nothing answers them back |
-| `self_contradiction` | the same author is cited on both sides of your own files |
+| `self_contradiction` | the same author is cited on both sides **within one team's files** (§10) |
 | `duplicate_bloat` | the same cut appears repeatedly under different tags |
 
 Model-backed:
@@ -69,7 +69,8 @@ Model-backed:
 `self_contradiction` deserves a note: it is cheap to compute and genuinely
 round-losing. If your aff cites an author for one claim and your neg cites the
 same author for the opposite, a good opponent reads your own evidence back at
-you.
+you. It is also the check that real data broke — see §10 for why "your own
+files" needed a definition.
 
 ## 3. Internal link chains
 
@@ -250,7 +251,35 @@ loudly instead of replaying a stale answer to a question you no longer ask.
 The suite's centre of gravity is `TestGrounding`. Those are the tests that check
 the system refuses to lie.
 
-## 10. What this does not do
+## 10. What real data changed
+
+Section 5 lists two bugs found in review. Running the analyzer over the
+published archive — 789 teams, 2,097 cards — found a third, and it is the same
+mistake in a new costume: **a check that assumes a fact about its input and
+never verifies it.**
+
+`check_self_contradiction` compares an author cited on both sides. On one team's
+files that is a genuine round-loser. On an 800-school archive it reported that
+Bostrom, Baudrillard, Tommy Curry and forty others are "cited on both sides" —
+every one of those statements true, and every one useless, because the aff card
+belongs to one school and the neg card to another. Nobody contradicted anybody.
+
+The fix is an `_owner_of` scope derived from the source's directory, and the
+check now requires both cards to share it: 40+ findings became 16, each of which
+is one team genuinely arguing against itself. The lesson generalizes past this
+one function: **any check phrased as "your own files" needs to know where your
+files end.** A single-corpus assumption is invisible until the corpus is not
+single.
+
+The same run also confirmed the parts that hold. Grounding was 22/22 on real
+evidence with zero invalid citations and zero dropped quotes — the citation-by-
+index scheme survives contact with cards the model has never seen. Duplicate
+detection surfaced real recuts across schools. And the disclosure-only flag
+earned itself immediately: without it the archive would have produced 1,797
+identical "nothing is underlined" findings, all true, burying everything worth
+reading.
+
+## 11. What this does not do
 
 - It does not judge whether an argument is *true* — only whether your cards
   establish what your tags claim.

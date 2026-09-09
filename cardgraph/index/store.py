@@ -53,7 +53,9 @@ CREATE TABLE IF NOT EXISTS cards (
     source_id      TEXT,
     source_path    TEXT,
     ordinal        INTEGER,
-    warrant_flags  TEXT
+    warrant_flags  TEXT,
+    disclosed_only INTEGER DEFAULT 0,
+    round_context  TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_cards_source ON cards(source_id);
@@ -139,14 +141,15 @@ class Store:
                        (card_id, tag, cite_raw, cite_author, cite_year, cite_pub,
                         cite_url, body, read_text, emphasis_text, read_ratio, side,
                         path_json, block, pocket, source_id, source_path, ordinal,
-                        warrant_flags)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        warrant_flags, disclosed_only, round_context)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (card.card_id, card.tag, card.cite.raw, card.cite.author,
                      card.cite.year, card.cite.publication, card.cite.url,
                      card.body, card.read_text, card.emphasis_text,
                      card.read_ratio, card.side.value, json.dumps(card.path),
                      card.block, card.pocket, card.source_id, card.source_path,
-                     card.ordinal, json.dumps(card.warrant_flags)),
+                     card.ordinal, json.dumps(card.warrant_flags),
+                     1 if card.disclosed_only else 0, card.round_context),
                 )
                 if cur.rowcount:
                     added += 1
@@ -274,4 +277,6 @@ def row_to_card(r: dict) -> Card:
         path=json.loads(r["path_json"] or "[]"),
         side=Side(r["side"] or "unknown"),
         card_id=r["card_id"],
+        disclosed_only=bool(r["disclosed_only"] if "disclosed_only" in r.keys() else 0),
+        round_context=(r["round_context"] if "round_context" in r.keys() else "") or "",
     )

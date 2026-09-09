@@ -101,14 +101,17 @@ def check_power_tagging(cards: list[dict]) -> list[Finding]:
         rr = c.get("read_ratio") or 0.0
         if not STRONG_CLAIM.search(tag):
             continue
+        # For a disclosure-only card read_text IS the body, so read_ratio is 1.0
+        # by construction and carries no signal. Only the hedging test applies.
+        disclosed = bool(c.get("disclosed_only"))
         reasons = []
         if read and HEDGE.search(read) and not HEDGE.search(tag):
             reasons.append("the underlined text hedges where the tag does not")
-        if 0 < rr < 0.15:
+        if not disclosed and 0 < rr < 0.15:
             reasons.append(f"only {rr:.0%} of the card is underlined")
-        if not read.strip():
+        if not disclosed and not read.strip():
             reasons.append("nothing is underlined at all")
-        if body and HEDGE.search(body) and read and not HEDGE.search(read):
+        if not disclosed and body and HEDGE.search(body) and read and not HEDGE.search(read):
             reasons.append("the surrounding context hedges the claim in a way "
                            "the underlined portion hides")
         if not reasons:
@@ -156,6 +159,17 @@ def check_qualifications(title: str, cards: list[dict]) -> list[Finding]:
 
 
 def check_read_text_health(cards: list[dict]) -> list[Finding]:
+    """Read-health only means something for cards that *have* a full body.
+
+    A caselist card is disclosed as its first and last lines by convention --
+    there is no fuller body and no underlining to miss. Running these checks on
+    an archive ingest produces one true, useless finding per card and buries
+    everything else, so disclosure-only cards are excluded here rather than
+    flagged for a defect they cannot have.
+    """
+    cards = [c for c in cards if not c.get("disclosed_only")]
+    if not cards:
+        return []
     out: list[Finding] = []
     none_read = [c for c in cards if not (c.get("read_text") or "").strip()]
     if none_read:
@@ -237,6 +251,7 @@ def template_sources(store: Store, threshold: float = 0.9,
         """SELECT s.source_id, s.title, COUNT(c.card_id) AS n,
                   SUM(CASE WHEN TRIM(COALESCE(c.read_text,'')) != ''
                             OR TRIM(COALESCE(c.cite_raw,'')) != ''
+                            OR c.disclosed_only = 1
                        THEN 1 ELSE 0 END) AS filled
            FROM sources s JOIN cards c ON c.source_id = s.source_id
            GROUP BY s.source_id""").fetchall()
@@ -355,23 +370,46 @@ def check_unanswered_positions(store: Store) -> list[Finding]:
     )]
 
 
-def check_self_contradiction(store: Store) -> list[Finding]:
-    """The same source carrying opposite sides in your own files.
+def _owner_of(row: dict) -> str:
+    """Whose files a card belongs to.
 
-    This is a real round-losing failure. If your aff cites Ember for
-    'renewables can't firm the load' and your neg cites Ember for 'large buyers
-    drive clean procurement', a good opponent reads both of your cards back at
-    you.
+    For a single team's folder this is constant and irrelevant. For an ingested
+    archive it is essential: the published caselist is ~800 *different* teams,
+    and any check that reasons about "your own files" has to know where one
+    team's files end and another's begin. The team is the directory the source
+    lives in, which is how both the archive and every real file layout are
+    organized.
+    """
+    path = (row.get("source_path") or "").replace("\\", "/")
+    parts = [p for p in path.split("/") if p]
+    if len(parts) >= 2:
+        return parts[-2]
+    return row.get("source_id") or ""
+
+
+def check_self_contradiction(store: Store) -> list[Finding]:
+    """The same source carrying opposite sides *within one team's files*.
+
+    A real round-losing failure: if your aff cites Ember for "renewables can't
+    firm the load" and your neg cites Ember for "large buyers drive clean
+    procurement", a good opponent reads both of your cards back at you.
+
+    Scoped by owner, and that scoping is the whole correctness of the check.
+    Run unscoped over the published archive it reports that Bostrom, Baudrillard
+    and forty others are "cited on both sides" -- which is true of the community
+    and meaningless as advice, because the aff card is one school's and the neg
+    card is another's. Nobody contradicted themselves.
     """
     rows = [dict(r) for r in store.conn.execute(
-        "SELECT card_id, cite_author, cite_year, side, tag, source_id "
-        "FROM cards WHERE cite_author IS NOT NULL AND cite_author != ''")]
-    by_author: dict[str, list[dict]] = defaultdict(list)
+        "SELECT card_id, cite_author, cite_year, side, tag, source_id, "
+        "source_path FROM cards WHERE cite_author IS NOT NULL "
+        "AND cite_author != ''")]
+    by_key: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for r in rows:
-        by_author[(r["cite_author"] or "").strip().lower()].append(r)
+        by_key[(_owner_of(r), (r["cite_author"] or "").strip().lower())].append(r)
 
     out: list[Finding] = []
-    for author, group in by_author.items():
+    for (owner, author), group in by_key.items():
         sides = {g["side"] for g in group} - {"unknown", None}
         if not {"aff", "neg"} <= sides:
             continue
@@ -379,7 +417,8 @@ def check_self_contradiction(store: Store) -> list[Finding]:
         neg = [g for g in group if g["side"] == "neg"]
         out.append(Finding(
             kind="self_contradiction", severity=Severity.MAJOR,
-            title=f"{group[0]['cite_author']} is cited on both sides",
+            title=(f"{group[0]['cite_author']} is cited on both sides"
+                   + (f" in {owner}" if owner else "")),
             detail=(f"You read {group[0]['cite_author']} for the aff "
                     f"({aff[0]['tag'][:60]}…) and for the neg "
                     f"({neg[0]['tag'][:60]}…). If both files see a round, the "
@@ -388,7 +427,7 @@ def check_self_contradiction(store: Store) -> list[Finding]:
                 "be ready to explain why the two claims are compatible.",
             card_ids=[g["card_id"] for g in (aff[:3] + neg[:3])],
             analyzer="deterministic:self_contradiction",
-            evidence={"author": group[0]["cite_author"],
+            evidence={"author": group[0]["cite_author"], "owner": owner,
                       "aff_cards": len(aff), "neg_cards": len(neg)},
         ))
     return out

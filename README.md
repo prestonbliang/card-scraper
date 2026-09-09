@@ -96,7 +96,7 @@ anyway — see below.
 | --- | --- | --- |
 | **OpenDebateEvidence** | ~3.5M cards from OpenCaseList, published as a research dataset *with the project's blessing*, PII-anonymized ([arXiv:2406.14657](https://arxiv.org/abs/2406.14657)) | `ingest-opendebate` |
 | Open Evidence Project | camp files released for free community use | `ingest openev <url>` |
-| `caselist-archive` | published archives of past seasons | `ingest caselist-archive` |
+| `caselist-archive` | ~40,000 archived caselist wiki pages, 2013 onward | `ingest caselist-archive` |
 | your own files | no network, no questions | `ingest local <dir>` |
 
 OpenDebateEvidence is the important one. It is the same evidence the gated wiki
@@ -161,6 +161,29 @@ login). Override with `CARDGRAPH_LLM=anthropic|claude-cli|none`.
 
 ---
 
+## Validated against the real archive
+
+Everything above was built against a fixture I wrote myself, which proves
+nothing. So it was run against the published caselist archive: **992 real files,
+789 teams, 2,097 cards.** Five things broke, all of them silently.
+
+| what broke | why it mattered |
+| --- | --- |
+| The archive is 40,000 `.htm` files, not `.docx` | The `caselist-archive` adapter globbed `*.docx`, found nothing, and reported success. A documented source ingested zero cards. |
+| Caselist pages aren't card files | They disclose the **first and last lines** of a card with `AND` marking the omitted middle. No body, no underlining. Needed its own parser and a `disclosed_only` flag, or every archive card gets a true and useless "nothing is underlined" finding. |
+| "The" and "I" were the top two authors | The HTML parser took line 0 as the cite for any multi-line paragraph, eating the first line of every analytic ("I affirm."). 58 cards attributed to pronouns, quietly corrupting every source-concentration finding. |
+| `self_contradiction` flagged half the canon | It assumed one owner's files. Across 789 schools it reported Bostrom, Baudrillard and 40 others as "cited on both sides" — true of the community, meaningless as advice. Now scoped by team: 40+ → 16, each real. |
+| Read-text coverage was 13% on real `.docx` | Not a parser bug, and proving that took an independent OOXML audit: 22 of 34 real uploads contain **no highlighting at all** (open-source disclosures are often plain speech docs), 10 are marked and extracted correctly, 2 are marked at 4–8% density and tracked closely. The warning now distinguishes "no highlighting here" from "we may have missed this file's convention" — opposite problems that look identical in a coverage number. |
+
+What worked unchanged: the HTML parser hit 100% read-text and 82% author
+coverage; duplicate detection found real evidence recut across schools (Woller
+97 tagged differently by Apple Valley and Woodlands College Park; Fai 2001 by
+Flower Mound and Katy Taylor); the model pass ran over 406 positions with
+**22/22 findings citing a real card** at $0.78.
+
+Regression tests for every one of these live in
+`tests/test_caselist_html.py::TestRealDataRegressions`.
+
 ## Install
 
 ```bash
@@ -208,6 +231,7 @@ cardgraph/
   models.py            Card, OutlineNode, side inference, AT: prefix grammar
   parse/styles.py      run-mark resolution through the style inheritance chain
   parse/docx_card.py   the .docx state machine + fallback parser
+  parse/caselist_html.py  archived caselist wiki pages (XWiki HTML)
   parse/cite.py        cite field extraction
   ingest/policy.py     allowlist, tiers, robots, rate limiting
   ingest/fetch.py      Scrapling wrapper, urllib fallback
@@ -225,7 +249,7 @@ cardgraph/
   api/main.py          FastAPI, localhost by default
 web/index.html         single-file UI: search, browse, analysis
 seed/                  synthetic fixture + moratorium skeleton
-tests/                 78 tests; the grounding suite is the important one
+tests/                 111 tests; the grounding suite is the important one
 ```
 
 ## Notes on running it as a service

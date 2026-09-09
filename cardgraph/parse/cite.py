@@ -51,6 +51,36 @@ def _normalize_year(tok: str) -> int | None:
     return 1900 + v if v >= 90 else 2000 + v
 
 
+# Words that begin a sentence, not a name. A cite line that starts with one of
+# these is almost always analytic prose that was misidentified upstream; letting
+# it through fills the author index with "The" and "I" and quietly corrupts
+# every source-concentration finding that counts distinct authors.
+_NOT_AUTHORS = {
+    "the", "a", "an", "i", "we", "they", "he", "she", "it", "this", "that",
+    "these", "those", "there", "here", "and", "but", "or", "if", "as", "in",
+    "on", "at", "by", "for", "of", "to", "from", "with", "my", "our", "your",
+    "his", "her", "their", "its", "no", "not", "first", "second", "third",
+    "next", "thus", "therefore", "however", "moreover", "furthermore", "also",
+    "resolved", "contention", "value", "criterion", "framework", "observation",
+    "prefer", "because", "since", "when", "while", "all", "any", "every",
+}
+
+
+def _plausible_author(author: str) -> bool:
+    """Reject sentence-openers and single letters masquerading as surnames."""
+    if not author:
+        return False
+    tokens = [t.strip(".,").lower() for t in author.split() if t.strip(".,")]
+    if not tokens:
+        return False
+    if tokens[0] in _NOT_AUTHORS:
+        return False
+    # a lone initial ("A.", "I") is not an attribution
+    if len(tokens) == 1 and len(tokens[0]) <= 2:
+        return False
+    return True
+
+
 def parse_cite(raw: str) -> Cite:
     raw = (raw or "").strip()
     c = Cite(raw=raw)
@@ -72,7 +102,8 @@ def parse_cite(raw: str) -> Cite:
     if am:
         author = am.group(1).strip(" ,")
         # Guard against swallowing an all-caps publication as the author.
-        if author and not author.isupper() or len(author.split()) <= 3:
+        ok = (author and not author.isupper()) or len(author.split()) <= 3
+        if ok and _plausible_author(author):
             c.author = author
 
     tm = _QUOTED_TITLE.search(raw)

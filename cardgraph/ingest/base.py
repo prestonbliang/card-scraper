@@ -60,9 +60,17 @@ class LocalDirAdapter(SourceAdapter):
         super().__init__(**kw)
         self.root = root
 
+    # Both shapes of debate source: Verbatim card files, and archived caselist
+    # wiki pages. Globbing only *.docx was a real bug -- the caselist-archive
+    # adapter reported success and ingested zero cards, because that archive is
+    # 40,000 .htm files.
+    PATTERNS = ("*.docx", "*.docm", "*.htm", "*.html")
+
     def acquire(self, limit: int | None = None) -> list[Acquired]:
-        pattern = os.path.join(self.root, "**", "*.docx")
-        found = sorted(p for p in glob.glob(pattern, recursive=True)
+        found: list[str] = []
+        for pat in self.PATTERNS:
+            found += glob.glob(os.path.join(self.root, "**", pat), recursive=True)
+        found = sorted(p for p in set(found)
                        if not os.path.basename(p).startswith("~$"))
         if limit:
             found = found[:limit]

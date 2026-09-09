@@ -53,6 +53,12 @@ class ParseReport:
     cards_without_read_text: int = 0
     outline_nodes: int = 0
     used_fallback: bool = False
+    # Fraction of body runs carrying read-marking. This is what separates "this
+    # file has no highlighting" from "this file marks highlighting in a way we
+    # cannot see", which look identical in a coverage number and need opposite
+    # responses from the user.
+    body_runs: int = 0
+    marked_runs: int = 0
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -61,11 +67,31 @@ class ParseReport:
             return 0.0
         return round(1 - self.cards_without_read_text / self.cards, 4)
 
+    @property
+    def marking_density(self) -> float:
+        """How much of the body is marked as read, measured independently of
+        whether we managed to attach it to a card."""
+        if not self.body_runs:
+            return 0.0
+        return round(self.marked_runs / self.body_runs, 4)
+
+    @property
+    def unmarked_source(self) -> bool:
+        """True when the document simply contains no highlighting.
+
+        Common and legitimate: open-source disclosure uploads are frequently
+        plain full-text speech documents with nothing underlined. Measured on
+        real archive files, 22 of 34 were like this. Reporting those as a parser
+        problem sends people to debug a file that has nothing in it to find.
+        """
+        return self.body_runs >= 20 and self.marking_density < 0.02
+
     def summary(self) -> str:
         return (
             f"{os.path.basename(self.path)}: {self.cards} cards, "
             f"read-text coverage {self.read_text_coverage:.0%}, "
             f"cite coverage {1 - self.cards_without_cite / max(self.cards, 1):.0%}"
+            + (" [no highlighting in source]" if self.unmarked_source else "")
             + (" [fallback parser]" if self.used_fallback else "")
         )
 
@@ -266,6 +292,13 @@ def parse_docx(path: str, source_id: str | None = None) -> tuple[list[Card], Out
             acc.body_parts.append(full)
             acc.read_parts.append(read)
             acc.emph_parts.append(emph)
+            if len(text) >= 120:
+                for run in p.runs:
+                    if not run.text.strip():
+                        continue
+                    report.body_runs += 1
+                    if resolve_marks(run, p).is_read:
+                        report.marked_runs += 1
 
     flush()
 
@@ -276,11 +309,27 @@ def parse_docx(path: str, source_id: str | None = None) -> tuple[list[Card], Out
     report.cards = len(cards)
     report.outline_nodes = _count_nodes(root)
     if report.cards and report.read_text_coverage < 0.5:
-        report.warnings.append(
-            "Under half of cards have read text -- this file probably marks the "
-            "read portion in a way the style resolver missed. Inspect one card "
-            "before trusting search results from this source."
-        )
+        if report.unmarked_source:
+            # Not a defect, and saying so matters: measured across the published
+            # archive, 22 of 34 real open-source .docx uploads contain no
+            # highlighting at all. Telling someone the parser "missed" those
+            # sends them to debug a file with nothing in it to find.
+            report.warnings.append(
+                f"No highlighting in this document "
+                f"({report.marked_runs}/{report.body_runs} body runs marked), so "
+                f"there is no read text to extract. Common for open-source "
+                f"disclosure uploads, which are often plain full-text speech "
+                f"documents rather than cut card files. Search falls back to "
+                f"the full body for these cards."
+            )
+        else:
+            report.warnings.append(
+                f"Under half of cards have read text, but "
+                f"{report.marking_density:.0%} of body runs ARE marked -- this "
+                f"file likely marks the read portion in a way the style "
+                f"resolver missed. Inspect one card before trusting search "
+                f"results from this source."
+            )
     return cards, root, report
 
 
@@ -338,8 +387,15 @@ def _fallback_parse(doc, source_id: str, path: str, report: ParseReport):
 
 
 def parse_any(path: str, source_id: str | None = None):
-    """Dispatch on extension. .docx today; .html/.txt hooks for wiki dumps."""
+    """Dispatch on extension: .docx card files, .htm archived caselist pages."""
     ext = os.path.splitext(path)[1].lower()
     if ext in (".docx", ".docm"):
         return parse_docx(path, source_id)
+    if ext in (".htm", ".html"):
+        from .caselist_html import is_caselist_page, parse_caselist_html
+        if not is_caselist_page(path):
+            raise ValueError(
+                f"{path} is HTML but not a recognizable caselist page "
+                f"(no wikigeneratedheader / tblCites markers)")
+        return parse_caselist_html(path, source_id)
     raise ValueError(f"no parser for {ext} (path={path})")
