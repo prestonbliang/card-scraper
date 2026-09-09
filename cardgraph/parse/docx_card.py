@@ -35,7 +35,8 @@ from docx.text.paragraph import Paragraph
 
 from ..models import Card, NodeKind, OutlineNode, Side, infer_side
 from .cite import looks_like_cite, parse_cite
-from .styles import is_cite_style, outline_level, resolve_marks
+from .styles import (is_cite_style, outline_level, resolve_marks,
+                     style_index_for)
 
 # A tag is a claim sentence: short-ish, no trailing citation apparatus.
 _MAX_TAG_LEN = 400
@@ -136,7 +137,7 @@ def _stitch(spans: list[tuple[str, bool]]) -> str:
     return _clean("".join(out))
 
 
-def _paragraph_marks(paragraph) -> tuple[str, str, str]:
+def _paragraph_marks(paragraph, index=None) -> tuple[str, str, str]:
     """Return (full_text, read_text, emphasis_text) for one paragraph."""
     full: list[str] = []
     read_spans: list[tuple[str, bool]] = []
@@ -146,7 +147,7 @@ def _paragraph_marks(paragraph) -> tuple[str, str, str]:
         if not txt:
             continue
         full.append(txt)
-        marks = resolve_marks(run, paragraph)
+        marks = resolve_marks(run, paragraph, index)
         read_spans.append((txt, marks.is_read))
         emph_spans.append((txt, marks.is_emphasis))
     return "".join(full), _stitch(read_spans), _stitch(emph_spans)
@@ -204,6 +205,8 @@ def parse_docx(path: str, source_id: str | None = None) -> tuple[list[Card], Out
     source_id = source_id or os.path.basename(path)
     report = ParseReport(path=path)
     doc = docx.Document(path)
+    # Resolve the style table once for the whole document -- see StyleIndex.
+    index = style_index_for(doc.part)
 
     root = OutlineNode(title=os.path.basename(path), kind=NodeKind.POCKET,
                        path=[], source_id=source_id)
@@ -250,7 +253,7 @@ def parse_docx(path: str, source_id: str | None = None) -> tuple[list[Card], Out
             for row in item.rows:
                 for cell in row.cells:
                     for p in cell.paragraphs:
-                        full, read, emph = _paragraph_marks(p)
+                        full, read, emph = _paragraph_marks(p, index)
                         if full.strip():
                             acc.body_parts.append(full)
                             acc.read_parts.append(read)
@@ -260,7 +263,7 @@ def parse_docx(path: str, source_id: str | None = None) -> tuple[list[Card], Out
         p = item
         report.paragraphs += 1
         lvl = outline_level(p)
-        full, read, emph = _paragraph_marks(p)
+        full, read, emph = _paragraph_marks(p, index)
         text = _clean(full)
 
         if lvl is not None and lvl <= 3:
@@ -297,14 +300,14 @@ def parse_docx(path: str, source_id: str | None = None) -> tuple[list[Card], Out
                     if not run.text.strip():
                         continue
                     report.body_runs += 1
-                    if resolve_marks(run, p).is_read:
+                    if resolve_marks(run, p, index).is_read:
                         report.marked_runs += 1
 
     flush()
 
     if not cards:
         report.used_fallback = True
-        cards, root = _fallback_parse(doc, source_id, path, report)
+        cards, root = _fallback_parse(doc, source_id, path, report, index)
 
     report.cards = len(cards)
     report.outline_nodes = _count_nodes(root)
@@ -337,7 +340,8 @@ def _count_nodes(node: OutlineNode) -> int:
     return 1 + sum(_count_nodes(c) for c in node.children)
 
 
-def _fallback_parse(doc, source_id: str, path: str, report: ParseReport):
+def _fallback_parse(doc, source_id: str, path: str, report: ParseReport,
+                    index=None):
     """For files with no heading styles at all.
 
     Anchor on cite lines: a paragraph that looks like a cite, preceded by a
@@ -360,7 +364,7 @@ def _fallback_parse(doc, source_id: str, path: str, report: ParseReport):
             body_parts, read_parts, emph_parts = [], [], []
             k = i + 1
             while k < len(texts) and not looks_like_cite(texts[k]):
-                full, read, emph = _paragraph_marks(paras[k])
+                full, read, emph = _paragraph_marks(paras[k], index)
                 if full.strip():
                     body_parts.append(full)
                     read_parts.append(read)
@@ -386,6 +390,22 @@ def _fallback_parse(doc, source_id: str, path: str, report: ParseReport):
     return cards, root
 
 
+class UnsupportedFormat(ValueError):
+    """This file is not something we can parse, and that is a clean skip.
+
+    Distinct from a parse *error* on purpose. An ingest that reports "7,110
+    unparseable" reads as catastrophic breakage; the truth was that 7,094 of
+    those were a pre-2011 wiki export in a format this project does not claim
+    to support. Conflating "we do not handle this" with "this broke" makes a
+    successful run look like a failed one and hides real failures inside the
+    noise.
+    """
+
+    def __init__(self, path: str, reason: str):
+        self.path, self.reason = path, reason
+        super().__init__(f"{os.path.basename(path)}: {reason}")
+
+
 def parse_any(path: str, source_id: str | None = None):
     """Dispatch on extension: .docx card files, .htm archived caselist pages."""
     ext = os.path.splitext(path)[1].lower()
@@ -394,8 +414,12 @@ def parse_any(path: str, source_id: str | None = None):
     if ext in (".htm", ".html"):
         from .caselist_html import is_caselist_page, parse_caselist_html
         if not is_caselist_page(path):
-            raise ValueError(
-                f"{path} is HTML but not a recognizable caselist page "
-                f"(no wikigeneratedheader / tblCites markers)")
+            raise UnsupportedFormat(
+                path,
+                "HTML, but not a caselist wiki page (no wikigeneratedheader or "
+                "tblCites markers). Older ndtceda exports store disclosures as "
+                "unstructured <br>-separated text with no headers or cite "
+                "markup; parsing those by guesswork would produce cards whose "
+                "tag and body boundaries are invented, so they are skipped.")
         return parse_caselist_html(path, source_id)
-    raise ValueError(f"no parser for {ext} (path={path})")
+    raise UnsupportedFormat(path, f"no parser for {ext} files")

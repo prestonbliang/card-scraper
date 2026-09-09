@@ -16,7 +16,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import time
 
 from .graph.relate import build_all
 from .index.search import SearchEngine
@@ -24,7 +26,7 @@ from .index.store import Store
 from .ingest.base import (CaselistArchiveAdapter, GitRepoAdapter,
                           LocalDirAdapter, OpenEvidenceAdapter)
 from .ingest.policy import AccessPolicy, AccessRefused, explain_allowlist
-from .parse.docx_card import parse_any
+from .parse.docx_card import UnsupportedFormat, parse_any
 
 
 def cmd_ingest(args) -> int:
@@ -51,29 +53,88 @@ def cmd_ingest(args) -> int:
         return 3
 
     if not acquired:
-        print("nothing to ingest (no .docx found)")
+        print("nothing to ingest (no .docx or .htm found)")
         return 0
 
+    # Resume by default. A full archive ingest takes tens of minutes; without
+    # this, one interruption at file 14,000 means starting over. Sources are
+    # keyed on the absolute path, so re-running only picks up what is new.
+    done: set[str] = set()
+    if not args.force:
+        done = {r[0] for r in store.conn.execute(
+            "SELECT source_id FROM sources WHERE card_count > 0")}
+        skipped = sum(1 for a in acquired if a.source.source_id in done)
+        if skipped:
+            print(f"resuming: {skipped} of {len(acquired)} files already "
+                  f"ingested (--force to redo)")
+            acquired = [a for a in acquired
+                        if a.source.source_id not in done]
+            if not acquired:
+                print("nothing new to ingest")
+                return 0
+
     total_cards = 0
-    low_coverage = []
-    for item in acquired:
+    low_coverage: list[str] = []
+    failures = 0
+    skipped_fmt = 0
+    skip_reason = ""
+    unmarked = 0
+    started = time.monotonic()
+    every = max(1, min(200, len(acquired) // 20 or 1))
+    verbose = len(acquired) <= 50
+
+    for i, item in enumerate(acquired, 1):
         try:
             cards, root, report = parse_any(item.path, item.source.source_id)
+        except UnsupportedFormat as exc:
+            # Not a failure: a format we do not claim to handle.
+            skipped_fmt += 1
+            skip_reason = skip_reason or exc.reason
+            continue
         except Exception as exc:  # noqa: BLE001
-            print(f"  ! parse failed {item.path}: {exc}")
+            failures += 1
+            if verbose:
+                print(f"  ! parse failed {os.path.basename(item.path)}: {exc}")
             continue
         item.source.card_count = len(cards)
         store.add_source(item.source)
         added = store.add_cards(cards)
         store.add_outline(root)
         total_cards += added
-        print(f"  {report.summary()}  (+{added} new)")
-        for w in report.warnings:
-            print(f"      warning: {w}")
-        if report.cards and report.read_text_coverage < 0.5:
+        if report.unmarked_source:
+            unmarked += 1
+
+        if verbose:
+            print(f"  {report.summary()}  (+{added} new)")
+            for w in report.warnings:
+                print(f"      warning: {w}")
+        elif i % every == 0 or i == len(acquired):
+            # A long ingest with no output is indistinguishable from a hang.
+            elapsed = time.monotonic() - started
+            rate = i / elapsed if elapsed else 0
+            eta = (len(acquired) - i) / rate if rate else 0
+            print(f"  [{i}/{len(acquired)}] {total_cards} cards · "
+                  f"{rate:.1f} files/s · eta {eta / 60:.1f} min"
+                  + (f" · {failures} failed" if failures else "")
+                  + (f" · {skipped_fmt} skipped" if skipped_fmt else ""),
+                  flush=True)
+
+        if report.cards and report.read_text_coverage < 0.5 \
+                and not report.unmarked_source:
             low_coverage.append(item.path)
 
-    print(f"\ningested {len(acquired)} files, {total_cards} new cards")
+    elapsed = time.monotonic() - started
+    parsed = len(acquired) - failures - skipped_fmt
+    print(f"\ningested {parsed} of {len(acquired)} files in "
+          f"{elapsed / 60:.1f} min, {total_cards} new cards"
+          + (f", {failures} failed" if failures else ""))
+    if skipped_fmt:
+        print(f"{skipped_fmt} file(s) skipped as an unsupported format -- "
+              f"{skip_reason}")
+    if unmarked:
+        print(f"{unmarked} file(s) contained no highlighting at all -- normal "
+              f"for open-source disclosure uploads; their cards fall back to "
+              f"full-body search.")
     if low_coverage:
         print(f"\n{len(low_coverage)} file(s) had poor read-text coverage. "
               f"Open one and check how it marks the read portion before you "
@@ -178,6 +239,8 @@ def main(argv: list[str] | None = None) -> int:
     i.add_argument("target", nargs="?", default="")
     i.add_argument("--workdir", default="data/corpus")
     i.add_argument("--limit", type=int, default=None)
+    i.add_argument("--force", action="store_true",
+                   help="re-ingest files already in the database")
     i.set_defaults(func=cmd_ingest)
 
     od = sub.add_parser("ingest-opendebate",

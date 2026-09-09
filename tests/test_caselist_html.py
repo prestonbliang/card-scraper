@@ -47,10 +47,27 @@ class TestDetection:
         cards, _, _ = parse_any(FIXTURE)
         assert cards
 
-    def test_parse_any_refuses_non_caselist_html(self, tmp_path):
+    def test_parse_any_skips_unsupported_html_as_a_distinct_type(self, tmp_path):
+        """The exception type is the contract, not the message.
+
+        An ingest that counts "we do not handle this format" as a parse failure
+        reports 7,110 unparseable files on the real archive and looks
+        catastrophically broken when nothing is wrong -- and buries the handful
+        of genuine failures inside that number.
+        """
+        from cardgraph.parse.docx_card import UnsupportedFormat
         p = tmp_path / "blog.html"
         p.write_text("<html><body><p>nope</p></body></html>")
-        with pytest.raises(ValueError, match="not a recognizable caselist"):
+        with pytest.raises(UnsupportedFormat) as exc:
+            parse_any(str(p))
+        assert isinstance(exc.value, ValueError)   # stays catchable as before
+        assert exc.value.reason                    # carries a stated reason
+
+    def test_unknown_extension_is_also_unsupported_not_a_failure(self, tmp_path):
+        from cardgraph.parse.docx_card import UnsupportedFormat
+        p = tmp_path / "notes.pdf"
+        p.write_text("x")
+        with pytest.raises(UnsupportedFormat):
             parse_any(str(p))
 
 

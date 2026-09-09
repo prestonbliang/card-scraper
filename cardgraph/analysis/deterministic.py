@@ -20,6 +20,7 @@ from collections import Counter, defaultdict
 
 from ..index.store import Store
 from ..models import answers_target
+from ..parse.authors import author_key, distinct_authors
 from .schema import Finding, Severity
 
 # Tag language that promises a strong causal claim. Used to detect the gap
@@ -40,9 +41,23 @@ QUAL = re.compile(
     r"engineer\b|attorney\b|commissioner\b)", re.IGNORECASE)
 
 
-def _distinct_sources(cards: list[dict]) -> set[tuple]:
-    return {(c.get("cite_author") or "").strip().lower() or f"?{c['card_id']}"
-            for c in cards} - {""}
+def _distinct_sources(cards: list[dict]) -> set[str]:
+    """How many genuinely different authors carry these cards.
+
+    Canonicalized rather than string-matched, because "Nick Bostrom",
+    "Bostrom" and "Bostrum, Nick. University" are one person and counting them
+    as three makes a single-source position look well-sourced -- a false
+    negative in the one check whose job is to catch exactly that.
+
+    Cards with no parseable author each count as their own source: unknown is
+    not evidence of sameness, and assuming otherwise would over-report
+    concentration.
+    """
+    named = [c.get("cite_author") for c in cards if (c.get("cite_author") or "").strip()]
+    keys = distinct_authors(named)
+    anon = {f"?{c['card_id']}" for c in cards
+            if not (c.get("cite_author") or "").strip()}
+    return keys | anon
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +421,10 @@ def check_self_contradiction(store: Store) -> list[Finding]:
         "AND cite_author != ''")]
     by_key: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for r in rows:
-        by_key[(_owner_of(r), (r["cite_author"] or "").strip().lower())].append(r)
+        key = author_key(r["cite_author"])
+        if not key:
+            continue
+        by_key[(_owner_of(r), key)].append(r)
 
     out: list[Finding] = []
     for (owner, author), group in by_key.items():
