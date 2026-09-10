@@ -164,8 +164,10 @@ login). Override with `CARDGRAPH_LLM=anthropic|claude-cli|none`.
 ## Validated against the real archive
 
 Everything above was built against a fixture I wrote myself, which proves
-nothing. So it was run against the published caselist archive: **992 real files,
-789 teams, 2,097 cards.** Five things broke, all of them silently.
+nothing. So it was run against the published caselist archive — first 992 files,
+then all five seasons: **22,221 files, 11,643 ingested, 166,816 cards, 2.5GB.**
+
+At 2,000 cards, five things broke, all of them silently.
 
 | what broke | why it mattered |
 | --- | --- |
@@ -181,8 +183,28 @@ coverage; duplicate detection found real evidence recut across schools (Woller
 Flower Mound and Katy Taylor); the model pass ran over 406 positions with
 **22/22 findings citing a real card** at $0.78.
 
+At 166,000 cards, five more did — none of which the small run could have shown.
+
+| what broke | why it mattered |
+| --- | --- |
+| A `.docx` took **4.4 seconds** to parse | 8.6 hours for the corpus. `resolve_marks` was 93% of it: python-docx re-resolves the same styles once per run (11,137 lookups, 631,000 attribute reads for one file). The style table is invariant per document, so `StyleIndex` now flattens it once. **4,368ms → 429ms.** Verified by diffing output against the old parser over 3,618 real cards — the first attempt differed on 2%, because it applied style-*name* implication to paragraph styles where the original applied it only to character styles. Now byte-for-byte identical. |
+| The search index refit on **every process start** | ~4 minutes, paid by every `search` and every `serve`. Now cached and fingerprinted on card ids: **warm start 6s.** The fingerprint is exact rather than a count, because deleting one card and adding another leaves a count unchanged — and a stale index is search that silently cannot see your newest evidence. |
+| Indexing a **small** file crashed | `max_df=0.85` prunes terms in most documents; on six similar cards it prunes *everything* and sklearn raises. A debater indexing their own file — the most likely first run — got a traceback instead of a search index. |
+| The sidebar rendered **11,643 root nodes** | One per ingested file, all into the DOM at once. Now paginated, sorted by card count, with a filter — and the filter searches the whole outline, because the root level is filenames and scoping a search for "Framework" to it returns nothing while the corpus holds 612 matching blocks. |
+| "7,110 unparseable" on a healthy run | 7,094 were pre-2011 ndtceda exports: unstructured `<br>`-separated text with no headers or cite markup, where parsing by guesswork would invent tag and body boundaries. `UnsupportedFormat` now separates a clean skip from a real failure, so genuine failures are not buried in the count. |
+
+Ingest is resumable and reports rate and ETA, because a 58-minute run with no
+output is indistinguishable from a hang and an interruption at file 20,000 meant
+starting over.
+
 Regression tests for every one of these live in
-`tests/test_caselist_html.py::TestRealDataRegressions`.
+`tests/test_caselist_html.py::TestRealDataRegressions`,
+`tests/test_authors.py`, and `TestIndexPersistence` /
+`TestSmallCorpusRobustness` in `tests/test_analysis.py`.
+
+**At full scale:** ingest 11,643 files in 58 min · graph build 2m34s (40,518
+answer edges, 31,011 duplicate edges) · index fit 3m52s once, 6s warm · search
+1.8s · UI first paint 0.5s · 23,214 distinct authors.
 
 ## Install
 
@@ -233,12 +255,13 @@ cardgraph/
   parse/docx_card.py   the .docx state machine + fallback parser
   parse/caselist_html.py  archived caselist wiki pages (XWiki HTML)
   parse/cite.py        cite field extraction
+  parse/authors.py     canonical author keys (one person, many spellings)
   ingest/policy.py     allowlist, tiers, robots, rate limiting
   ingest/fetch.py      Scrapling wrapper, urllib fallback
   ingest/base.py       local / git / http-index / openev adapters
   ingest/opendebate.py OpenDebateEvidence streaming adapter
   index/store.py       SQLite schema, FTS5 over read_text
-  index/search.py      BM25 + TF-IDF, RRF fusion, calibrated coverage check
+  index/search.py      BM25 + TF-IDF, RRF fusion, coverage check, cached index
   graph/relate.py      answer edges, duplicate detection, warrant flags
   llm/provider.py      providers, structured output, cache, ledger, salvage
   analysis/schema.py       Finding / ChainLink / GeneratedBlock, kind taxonomy
@@ -249,7 +272,7 @@ cardgraph/
   api/main.py          FastAPI, localhost by default
 web/index.html         single-file UI: search, browse, analysis
 seed/                  synthetic fixture + moratorium skeleton
-tests/                 111 tests; the grounding suite is the important one
+tests/                 148 tests; the grounding suite is the important one
 ```
 
 ## Notes on running it as a service

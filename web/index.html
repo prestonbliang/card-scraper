@@ -49,6 +49,12 @@ main{display:grid;grid-template-columns:300px 1fr;gap:0;min-height:calc(100vh - 
       max-height:calc(100vh - 58px);position:sticky;top:58px;background:var(--panel)}
 .treehdr{font-size:11px;text-transform:uppercase;letter-spacing:.09em;
          color:var(--muted);padding:0 8px 8px;font-weight:600}
+#treeFilter{width:calc(100% - 12px);margin:0 6px 6px;padding:6px 9px;font-size:12.5px}
+#treecount{font-family:var(--mono);font-size:10.5px;color:var(--muted);
+           padding:0 8px 6px}
+.more{padding:5px 8px;margin-top:2px;border-radius:6px;cursor:pointer;
+      font-size:12px;color:var(--accent);font-family:var(--mono)}
+.more:hover{background:var(--accent-soft)}
 .node{padding:4px 8px;border-radius:6px;cursor:pointer;display:flex;gap:6px;
       align-items:baseline;line-height:1.35}
 .node:hover{background:var(--accent-soft)}
@@ -184,7 +190,12 @@ h4.sec{font-size:11px;text-transform:uppercase;letter-spacing:.09em;
 </header>
 
 <main>
-  <nav id="tree"><div class="treehdr">Contentions &amp; blocks</div><div id="treebody"></div></nav>
+  <nav id="tree">
+    <div class="treehdr">Contentions &amp; blocks</div>
+    <input type="search" id="treeFilter" placeholder="Filter by name…" autocomplete="off">
+    <div id="treecount"></div>
+    <div id="treebody"></div>
+  </nav>
   <section id="content"></section>
 </main>
 
@@ -268,8 +279,25 @@ async function doSearch(){
 }
 
 /* ---------- tree ---------- */
-async function loadTree(parent, container, depth){
-  const r = await api("/api/tree" + (parent ? `?parent=${parent}` : ""));
+const TREE_PAGE = 150;
+
+async function loadTree(parent, container, depth, opts = {}){
+  const { offset = 0, q = "" } = opts;
+  const params = new URLSearchParams({ limit: TREE_PAGE, offset });
+  if (parent) params.set("parent", parent);
+  if (q) params.set("q", q);
+  const r = await api(`/api/tree?${params}`);
+
+  if (!parent && depth === 0){
+    // The root level is one node per ingested file. At archive scale that is
+    // ~12,000 of them, so it is paginated and filtered rather than dumped
+    // into the DOM.
+    const shown = Math.min(offset + r.nodes.length, r.total);
+    $("#treecount").textContent = r.total
+      ? `${shown} of ${r.total}` + (q ? ` matching "${q}"` : "")
+      : (q ? `nothing matches "${q}"` : "");
+  }
+
   for (const n of r.nodes){
     const row = el("div", "node" + (/^a\/?t:?\s/i.test(n.title) ? " at-node" : ""));
     const tw = el("span", "twisty", n.has_children ? "▸" : "");
@@ -288,6 +316,16 @@ async function loadTree(parent, container, depth){
       }
       showNode(n.node_id);
     };
+  }
+
+  const seen = offset + r.nodes.length;
+  if (seen < r.total){
+    const more = el("div", "more", `+ ${r.total - seen} more…`);
+    more.onclick = async () => {
+      more.remove();
+      await loadTree(parent, container, depth, { offset: seen, q });
+    };
+    container.append(more);
   }
 }
 
@@ -580,6 +618,15 @@ function renderWelcome(){
   $("#stats").textContent =
     `${s.cards} cards · ${s.nodes} nodes · ${s.edges} edges · ${s.sources} sources`;
   await loadTree(null, $("#treebody"), 0);
+  let ft;
+  $("#treeFilter").addEventListener("input", () => {
+    clearTimeout(ft);
+    ft = setTimeout(async () => {
+      $("#treebody").innerHTML = "";
+      await loadTree(null, $("#treebody"), 0,
+                     { q: $("#treeFilter").value.trim() });
+    }, 250);
+  });
   $("#mSearch").onclick = () => setMode("search");
   $("#mAnalysis").onclick = () => setMode("analysis");
   renderWelcome();

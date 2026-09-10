@@ -622,3 +622,145 @@ class TestEndToEnd:
         assert r.contentions[0].verdict == "This position has a hole in step one."
         # the verdict prompt must contain the chain_break finding
         assert "step 1 is missing" in prov.prompts[-1]
+
+
+class TestIndexPersistence:
+    """The search index is fitted once and cached.
+
+    At archive scale a cold fit is ~4 minutes. Paying that on every `search`
+    invocation and every `serve` startup makes the tool unusable at exactly the
+    size it was built for. The dangerous failure mode is the opposite one --
+    serving a cached index that cannot see cards added since -- so the
+    invalidation test matters more than the speed one.
+    """
+
+    def _store(self, tmp_path, n=6):
+        from cardgraph.models import Card, Cite, Source
+        st = Store(str(tmp_path / "t.db"))
+        st.add_source(Source(source_id="s", path="p", title="t"))
+        st.add_cards([
+            Card(tag=f"tag {i}", cite=Cite(raw=f"Author{i} 20"),
+                 body="ratepayer transmission cost allocation " * 4,
+                 read_text=f"distinct read text number {i} about rates",
+                 source_id="s", ordinal=i)
+            for i in range(n)])
+        return st
+
+    def test_cache_is_written_and_reused(self, tmp_path):
+        st = self._store(tmp_path)
+        cache = str(tmp_path / "idx.pkl")
+        msgs = []
+        SearchEngine(st, cache_path=cache).build(progress=lambda *a: msgs.append(" ".join(map(str, a))))
+        assert os.path.exists(cache)
+        assert "fitting" in msgs[0]
+
+        msgs2 = []
+        e2 = SearchEngine(st, cache_path=cache)
+        e2.build(progress=lambda *a: msgs2.append(" ".join(map(str, a))))
+        assert "loaded cached index" in msgs2[0]
+        assert e2.search("distinct read text number 3")
+
+    def test_adding_a_card_invalidates_the_cache(self, tmp_path):
+        """A stale index is search that silently cannot see your newest
+        evidence -- worse than a slow one."""
+        from cardgraph.models import Card, Cite
+        st = self._store(tmp_path)
+        cache = str(tmp_path / "idx.pkl")
+        SearchEngine(st, cache_path=cache).build()
+
+        st.add_cards([Card(tag="brand new", cite=Cite(raw="New 21"),
+                           body="a" * 90, read_text="a brand new claim entirely",
+                           source_id="s", ordinal=99)])
+        msgs = []
+        e = SearchEngine(st, cache_path=cache)
+        e.build(progress=lambda *a: msgs.append(" ".join(map(str, a))))
+        assert "fitting" in msgs[0], "must refit, not serve a stale index"
+        assert any(h.tag == "brand new" for h in e.search("brand new claim", k=5))
+
+    def test_fingerprint_detects_swap_not_just_count(self, tmp_path):
+        """Deleting one card and adding another leaves the count unchanged."""
+        from cardgraph.index.search import VectorIndex
+        a = VectorIndex.fingerprint(["x", "y", "z"])
+        b = VectorIndex.fingerprint(["x", "y", "w"])
+        assert a != b
+        assert a == VectorIndex.fingerprint(["z", "x", "y"])  # order-independent
+
+    def test_corrupt_cache_falls_back_to_fitting(self, tmp_path):
+        st = self._store(tmp_path)
+        cache = str(tmp_path / "idx.pkl")
+        with open(cache, "wb") as fh:
+            fh.write(b"not a pickle")
+        msgs = []
+        e = SearchEngine(st, cache_path=cache)
+        e.build(progress=lambda *a: msgs.append(" ".join(map(str, a))))
+        assert "fitting" in msgs[0]
+        assert e.search("distinct read text number 2")
+
+    def test_format_bump_invalidates(self, tmp_path):
+        from cardgraph.index.search import VectorIndex
+        st = self._store(tmp_path)
+        cache = str(tmp_path / "idx.pkl")
+        SearchEngine(st, cache_path=cache).build()
+        v = VectorIndex()
+        fp = VectorIndex.fingerprint(st.card_ids())
+        assert v.load(cache, fp)
+        v.FORMAT = VectorIndex.FORMAT + 1
+        assert not VectorIndex().load(cache, "different-fingerprint")
+
+    def test_matrix_is_float32(self, tmp_path):
+        import numpy as np
+        st = self._store(tmp_path)
+        e = SearchEngine(st, cache_path=str(tmp_path / "i.pkl"))
+        e.build()
+        assert e.vectors.matrix.dtype == np.float32
+
+
+class TestSmallCorpusRobustness:
+    """A first run is usually one debater's own file, not an archive.
+
+    `max_df=0.85` drops terms appearing in most documents, which is what keeps
+    a single-topic corpus from being swamped by its own vocabulary. On a small
+    or repetitive corpus it drops *everything* and sklearn raises -- so indexing
+    your own six-card file crashed, which is close to the worst possible first
+    impression. These are the shapes that broke it.
+    """
+
+    def _engine(self, texts, tmp_path):
+        from cardgraph.models import Card, Cite, Source
+        st = Store(str(tmp_path / "t.db"))
+        st.add_source(Source(source_id="s", path="p", title="t"))
+        st.add_cards([
+            Card(tag=f"t{i}", cite=Cite(raw=f"A{i} 20"), body="b" * 90,
+                 read_text=t, source_id="s", ordinal=i)
+            for i, t in enumerate(texts)])
+        e = SearchEngine(st, cache_path=str(tmp_path / "i.pkl"))
+        e.build()
+        return e
+
+    def test_identical_cards_do_not_crash(self, tmp_path):
+        e = self._engine(["ratepayer transmission cost allocation"] * 6, tmp_path)
+        assert len(e.vectors.card_ids) == 6
+        assert e.search("ratepayer transmission")
+
+    def test_single_card_corpus(self, tmp_path):
+        e = self._engine(["one single card about ratepayers"], tmp_path)
+        assert e.search("ratepayers")
+
+    def test_corpus_of_only_stop_words(self, tmp_path):
+        """Nothing survives the English stop list; fall back to keeping it."""
+        e = self._engine(["the and of to a in on at"] * 4, tmp_path)
+        assert len(e.vectors.card_ids) == 4
+
+    def test_two_cards(self, tmp_path):
+        """SVD needs at least two components; two rows is the boundary."""
+        e = self._engine(["grid policy claim one", "grid policy claim two"],
+                         tmp_path)
+        assert e.search("grid policy")
+
+    def test_empty_corpus_is_not_an_error(self, tmp_path):
+        from cardgraph.models import Source
+        st = Store(str(tmp_path / "t.db"))
+        st.add_source(Source(source_id="s", path="p", title="t"))
+        e = SearchEngine(st, cache_path=str(tmp_path / "i.pkl"))
+        e.build()
+        assert e.search("anything") == []

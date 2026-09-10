@@ -77,8 +77,9 @@ def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
         return row
 
     @app.get("/api/tree")
-    def tree(parent: str | None = None) -> dict:
-        return {"nodes": store.tree(parent)}
+    def tree(parent: str | None = None, limit: int = 200, offset: int = 0,
+             q: str | None = None) -> dict:
+        return store.tree(parent, limit=limit, offset=offset, q=q)
 
     @app.get("/api/node/{node_id}")
     def node(node_id: str) -> dict:
@@ -93,7 +94,7 @@ def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
         m = dict(meta)
         m["path"] = json.loads(m.pop("path_json") or "[]")
         return {"node": m, "cards": rows, "edges": store.edges_for(node_id),
-                "children": store.tree(node_id)}
+                "children": store.tree(node_id)["nodes"]}
 
     # ---- analysis --------------------------------------------------------
     # A model-backed run costs money and takes minutes, so the report is

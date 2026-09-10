@@ -23,6 +23,9 @@ are willing to carry a 2GB dependency.
 
 from __future__ import annotations
 
+import hashlib
+import os
+import pickle
 import re
 from dataclasses import dataclass
 
@@ -75,7 +78,21 @@ def _fts_escape(q: str) -> str:
 
 class VectorIndex:
     """TF-IDF -> SVD dense vectors over read_text (falling back to tag+body
-    when a card has no read text, so unparsed files still retrieve)."""
+    when a card has no read text, so unparsed files still retrieve).
+
+    Persisted to disk, because fitting is the expensive part and it does not
+    change between queries. Over the 166,816-card archive a cold fit takes about
+    four minutes; without a cache that cost is paid by every `search`
+    invocation and every `serve` startup, which makes the tool unusable at the
+    scale it was built for. Loading the cached fit takes a couple of seconds.
+
+    The cache is keyed on a fingerprint of the corpus, so it invalidates itself
+    when cards are added rather than silently serving a stale index -- which
+    would be the worse failure: search that quietly cannot see your newest
+    evidence.
+    """
+
+    FORMAT = 2   # bump to invalidate every cache after a fitting change
 
     def __init__(self, dims: int = 256):
         self.dims = dims
@@ -100,11 +117,25 @@ class VectorIndex:
         self.card_ids = [r["card_id"] for r in rows]
         corpus = [self._text_for(r) for r in rows]
 
-        self._vec = TfidfVectorizer(
-            stop_words="english", ngram_range=(1, 2),
-            min_df=1, max_df=0.85, sublinear_tf=True, max_features=120_000,
-        )
-        X = self._vec.fit_transform(corpus)
+        # max_df prunes terms that appear in almost every document, which is
+        # what stops a single-topic corpus being dominated by its own vocabulary.
+        # On a *small* or homogeneous corpus it prunes everything and sklearn
+        # raises -- so a debater indexing their own six-card file, which is the
+        # most likely first run this tool ever sees, gets a crash instead of a
+        # search index. Retry without the filter rather than fail.
+        def _fit(stop_words="english", **kw):
+            vec = TfidfVectorizer(stop_words=stop_words, ngram_range=(1, 2),
+                                  sublinear_tf=True, max_features=120_000, **kw)
+            return vec, vec.fit_transform(corpus)
+
+        try:
+            self._vec, X = _fit(min_df=1, max_df=0.85)
+        except ValueError:
+            try:
+                self._vec, X = _fit(min_df=1, max_df=1.0)
+            except ValueError:
+                # Every token is a stop word (or the corpus is near-empty).
+                self._vec, X = _fit(min_df=1, max_df=1.0, stop_words=None)
 
         n_comp = min(self.dims, max(2, min(X.shape) - 1))
         if X.shape[0] > 2 and n_comp >= 2:
@@ -113,7 +144,61 @@ class VectorIndex:
         else:
             self._svd = None
             dense = X.toarray()
-        self.matrix = normalize(dense)
+        # float32 halves the cache and the resident matrix (341MB -> 171MB at
+        # 166k x 256) with no measurable effect on cosine ranking.
+        self.matrix = normalize(dense).astype(np.float32, copy=False)
+
+    # -- persistence -------------------------------------------------------
+
+    @staticmethod
+    def fingerprint(card_ids) -> str:
+        """Identify this corpus cheaply but safely.
+
+        Count alone is not enough: deleting one card and adding another leaves
+        it unchanged. Hashing every id is exact and costs well under a second
+        at 166k cards, which is nothing next to a four-minute refit.
+
+        Takes ids, not rows, on purpose -- see Store.card_ids.
+        """
+        h = hashlib.sha1()
+        ids = list(card_ids)
+        h.update(str(len(ids)).encode())
+        for cid in sorted(ids):
+            h.update(cid.encode())
+        return h.hexdigest()[:16]
+
+    def save(self, path: str, fingerprint: str) -> None:
+        if self.matrix is None or self._vec is None:
+            return
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "wb") as fh:
+            pickle.dump({
+                "format": self.FORMAT, "fingerprint": fingerprint,
+                "dims": self.dims, "card_ids": self.card_ids,
+                "vec": self._vec, "svd": self._svd, "matrix": self.matrix,
+            }, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        # atomic: a half-written cache must never be loadable
+        os.replace(tmp, path)
+
+    def load(self, path: str, fingerprint: str) -> bool:
+        if not path or not os.path.exists(path):
+            return False
+        try:
+            with open(path, "rb") as fh:
+                blob = pickle.load(fh)
+        except Exception:
+            return False
+        if blob.get("format") != self.FORMAT:
+            return False
+        if blob.get("fingerprint") != fingerprint:
+            return False    # corpus changed; refit rather than serve a stale index
+        self.dims = blob["dims"]
+        self.card_ids = blob["card_ids"]
+        self._vec = blob["vec"]
+        self._svd = blob["svd"]
+        self.matrix = blob["matrix"]
+        return True
 
     def query(self, text: str, k: int = 50) -> list[tuple[str, float]]:
         if self.matrix is None or self._vec is None or not self.card_ids:
@@ -122,20 +207,38 @@ class VectorIndex:
 
         q = self._vec.transform([text])
         qd = self._svd.transform(q) if self._svd is not None else q.toarray()
-        qd = normalize(qd)
+        qd = normalize(qd).astype(self.matrix.dtype, copy=False)
         sims = (self.matrix @ qd.T).ravel()
         order = np.argsort(-sims)[:k]
         return [(self.card_ids[i], float(sims[i])) for i in order]
 
 
 class SearchEngine:
-    def __init__(self, store: Store):
+    def __init__(self, store: Store, cache_path: str | None = None):
         self.store = store
         self.vectors = VectorIndex()
         self._built = False
+        if cache_path is None and getattr(store, "path", None):
+            cache_path = os.path.splitext(store.path)[0] + ".index"
+        self.cache_path = cache_path
 
-    def build(self) -> None:
-        self.vectors.build(self.store.all_cards())
+    def build(self, use_cache: bool = True, progress=None) -> None:
+        say = progress or (lambda *_: None)
+        # Fingerprint from ids alone, so a cache hit never pays to load the
+        # whole corpus into memory.
+        fp = VectorIndex.fingerprint(self.store.card_ids())
+        if use_cache and self.cache_path and self.vectors.load(self.cache_path, fp):
+            say(f"loaded cached index ({len(self.vectors.card_ids)} cards)")
+            self._built = True
+            return
+        rows = self.store.all_cards()
+        say(f"fitting index over {len(rows)} cards (cached after this)")
+        self.vectors.build(rows)
+        if use_cache and self.cache_path:
+            try:
+                self.vectors.save(self.cache_path, fp)
+            except Exception:
+                pass    # a cache we cannot write is not a reason to fail a search
         self._built = True
 
     def _lexical(self, query: str, k: int) -> list[tuple[str, float]]:

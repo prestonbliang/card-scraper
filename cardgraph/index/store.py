@@ -224,16 +224,45 @@ class Store:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def tree(self, parent_id: str | None = None) -> list[dict]:
-        if parent_id is None:
-            rows = self.conn.execute(
-                "SELECT * FROM nodes WHERE parent_id IS NULL ORDER BY title"
-            ).fetchall()
+    def tree(self, parent_id: str | None = None, *, limit: int = 200,
+             offset: int = 0, q: str | None = None) -> dict:
+        """One level of the outline, paginated.
+
+        Pagination is not optional at archive scale. The root level is one node
+        per ingested file: 11,643 of them for five seasons, and returning them
+        all put every one into the sidebar DOM at once. `q` filters by title,
+        which is the only way to find anything in a list that long.
+
+        Returns {"nodes": [...], "total": n, "offset": k} rather than a bare
+        list, so the caller can tell truncation from exhaustion.
+        """
+        # A filter searches the whole outline, not one level of it. The root
+        # level is file names ("Apple Valley Boals Aff"), so scoping a search
+        # for "Ratepayer" to the roots returns nothing while the corpus holds
+        # hundreds of matching blocks -- the user concludes the evidence is not
+        # there when it is. With a query, parent scoping is dropped and only
+        # nodes that actually carry cards are returned, since a match on an
+        # empty container is not a result.
+        where: list[str] = []
+        params: list = []
+        if q:
+            where.append("title LIKE ?")
+            params.append(f"%{q}%")
+            where.append("card_count > 0")
+        elif parent_id is None:
+            where.append("parent_id IS NULL")
         else:
-            rows = self.conn.execute(
-                "SELECT * FROM nodes WHERE parent_id=? ORDER BY title",
-                (parent_id,),
-            ).fetchall()
+            where.append("parent_id = ?")
+            params.append(parent_id)
+        clause = " AND ".join(where)
+
+        total = self.conn.execute(
+            f"SELECT COUNT(*) FROM nodes WHERE {clause}", params).fetchone()[0]
+        rows = self.conn.execute(
+            f"SELECT * FROM nodes WHERE {clause} "
+            f"ORDER BY card_count DESC, title LIMIT ? OFFSET ?",
+            (*params, limit, offset)).fetchall()
+
         out = []
         for r in rows:
             d = dict(r)
@@ -242,7 +271,12 @@ class Store:
                 "SELECT 1 FROM nodes WHERE parent_id=? LIMIT 1", (d["node_id"],)
             ).fetchone())
             out.append(d)
-        return out
+        return {"nodes": out, "total": total, "offset": offset,
+                "limit": limit}
+
+    def tree_nodes(self, parent_id: str | None = None, **kw) -> list[dict]:
+        """Just the nodes, for internal callers that do not paginate."""
+        return self.tree(parent_id, **kw)["nodes"]
 
     def edges_for(self, node_id: str) -> dict[str, list[dict]]:
         out_ = self.conn.execute(
@@ -258,6 +292,17 @@ class Store:
 
     def all_cards(self) -> list[dict]:
         return [dict(r) for r in self.conn.execute("SELECT * FROM cards")]
+
+    def card_ids(self) -> list[str]:
+        """Just the ids, in a stable order.
+
+        Used for the search-index fingerprint. Doing that with `all_cards`
+        pulls every card body into Python -- roughly 300MB of objects at
+        166k cards -- to compute a hash of the ids, which dominated warm
+        start-up and bought nothing.
+        """
+        return [r[0] for r in self.conn.execute(
+            "SELECT card_id FROM cards ORDER BY card_id")]
 
     def close(self) -> None:
         self.conn.close()
