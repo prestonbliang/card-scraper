@@ -6,6 +6,7 @@
     python -m cardgraph.cli ingest opendebate --query "data center" --limit 2000
     python -m cardgraph.cli graph
     python -m cardgraph.cli analyze --top 5
+    python -m cardgraph.cli analyze --owner Greenhill --top 5
     python -m cardgraph.cli analyze --no-llm --json report.json
     python -m cardgraph.cli search "households subsidize industrial load"
     python -m cardgraph.cli stats
@@ -154,7 +155,7 @@ def cmd_analyze(args) -> int:
     report = analyze(
         store, max_positions=args.top, min_cards=args.min_cards,
         use_llm=not args.no_llm, generate_blocks=not args.no_blocks,
-        coverage_floor=args.coverage_floor,
+        coverage_floor=args.coverage_floor, owner=args.owner,
         progress=(lambda *a: print("..", *a, flush=True)) if args.verbose else None,
     )
     if args.json:
@@ -267,6 +268,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="skip answer-block generation")
     an.add_argument("--coverage-floor", type=float, default=0.35,
                     dest="coverage_floor")
+    an.add_argument("--owner", metavar="PATTERN",
+                    help="restrict to sources whose path or title matches. "
+                         "Essential on a shared corpus: every check asks about "
+                         "'your files', and unscoped over the published archive "
+                         "that means 46,712 positions belonging to 11,643 teams.")
     an.add_argument("--json", help="also write the full report to this path")
     an.add_argument("-v", "--verbose", action="store_true")
     an.set_defaults(func=cmd_analyze)

@@ -249,7 +249,8 @@ def check_recency(title: str, cards: list[dict], corpus_newest: int | None) -> l
 # ---------------------------------------------------------------------------
 
 def template_sources(store: Store, threshold: float = 0.9,
-                     min_cards: int = 3) -> dict[str, dict]:
+                     min_cards: int = 3,
+                     scope: set[str] | None = None) -> dict[str, dict]:
     """Sources that are outline templates rather than evidence.
 
     A file built from `seed/build_outline.py`, or any half-filled skeleton, has
@@ -271,6 +272,8 @@ def template_sources(store: Store, threshold: float = 0.9,
            FROM sources s JOIN cards c ON c.source_id = s.source_id
            GROUP BY s.source_id""").fetchall()
     for r in rows:
+        if not _in_scope(r["source_id"], scope):
+            continue
         n, filled = r["n"] or 0, r["filled"] or 0
         if n >= min_cards and (n - filled) / n >= threshold:
             out[r["source_id"]] = {"title": r["title"], "cards": n,
@@ -278,11 +281,15 @@ def template_sources(store: Store, threshold: float = 0.9,
     return out
 
 
-def check_template_sources(store: Store) -> list[Finding]:
-    tmpl = template_sources(store)
+def check_template_sources(store: Store,
+                           scope: set[str] | None = None) -> list[Finding]:
+    tmpl = template_sources(store, scope=scope)
     if not tmpl:
         return []
-    names = ", ".join(repr(v["title"]) for v in tmpl.values())
+    titles = [v["title"] for v in tmpl.values()]
+    names = ", ".join(repr(t) for t in titles[:5])
+    if len(titles) > 5:
+        names += f", and {len(titles) - 5} more"
     total = sum(v["cards"] for v in tmpl.values())
     return [Finding(
         kind="no_read_text", severity=Severity.INFO,
@@ -297,7 +304,8 @@ def check_template_sources(store: Store) -> list[Finding]:
     )]
 
 
-def check_answer_coverage(store: Store) -> list[Finding]:
+def check_answer_coverage(store: Store,
+                          scope: set[str] | None = None) -> list[Finding]:
     """Positions you run that the corpus answers, where you have no comeback.
 
     The graph already knows that "AT: Ratepayer Harm" answers "Ratepayer Harm".
@@ -318,6 +326,8 @@ def check_answer_coverage(store: Store) -> list[Finding]:
     out: list[Finding] = []
     for node in rows:
         if node["card_count"] < 1:
+            continue
+        if not _in_scope(node["source_id"], scope):
             continue
         if answers_target(node["title"]):
             continue  # this is itself an answer block
@@ -353,7 +363,8 @@ def check_answer_coverage(store: Store) -> list[Finding]:
     return out
 
 
-def check_unanswered_positions(store: Store) -> list[Finding]:
+def check_unanswered_positions(store: Store,
+                               scope: set[str] | None = None) -> list[Finding]:
     """Positions with real card support that nothing in the index answers.
 
     Not automatically a defect — it may just mean you have not ingested the
@@ -367,7 +378,8 @@ def check_unanswered_positions(store: Store) -> list[Finding]:
     total_at = store.conn.execute(
         "SELECT COUNT(*) FROM edges WHERE kind='answers'").fetchone()[0]
     bare = [n for n in rows
-            if n["node_id"] not in answered and not answers_target(n["title"])]
+            if n["node_id"] not in answered and not answers_target(n["title"])
+            and _in_scope(n["source_id"], scope)]
     if not bare or total_at == 0:
         return []
     return [Finding(
@@ -383,6 +395,32 @@ def check_unanswered_positions(store: Store) -> list[Finding]:
         evidence={"positions": [n["title"] for n in bare][:12],
                   "count": len(bare)},
     )]
+
+
+def scoped_source_ids(store: Store, owner: str | None) -> set[str] | None:
+    """Source ids matching an owner pattern, or None for "everything".
+
+    Explicit rather than clever. The first version of this wrapped the database
+    connection and spliced a `source_id IN (...)` clause into any SQL mentioning
+    cards or nodes. It silently missed the checks that query `edges` and
+    `sources`, so a report scoped to one school still announced 21,811 duplicate
+    pairs and 27 unfilled outlines belonging to everyone else -- presented as
+    that school's own. Reporting other people's data as yours is the exact
+    failure this project exists to avoid, and a filter that can be forgotten by
+    a query shape nobody anticipated will be.
+
+    So the scope is a set that every corpus check takes as a parameter. A new
+    check that ignores it is visible in its signature.
+    """
+    if not owner:
+        return None
+    return {r[0] for r in store.conn.execute(
+        "SELECT source_id FROM sources WHERE path LIKE ? OR title LIKE ?",
+        (f"%{owner}%", f"%{owner}%"))}
+
+
+def _in_scope(source_id, scope: set[str] | None) -> bool:
+    return scope is None or source_id in scope
 
 
 def _owner_of(row: dict) -> str:
@@ -402,7 +440,8 @@ def _owner_of(row: dict) -> str:
     return row.get("source_id") or ""
 
 
-def check_self_contradiction(store: Store) -> list[Finding]:
+def check_self_contradiction(store: Store,
+                             scope: set[str] | None = None) -> list[Finding]:
     """The same source carrying opposite sides *within one team's files*.
 
     A real round-losing failure: if your aff cites Ember for "renewables can't
@@ -421,6 +460,8 @@ def check_self_contradiction(store: Store) -> list[Finding]:
         "AND cite_author != ''")]
     by_key: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for r in rows:
+        if not _in_scope(r["source_id"], scope):
+            continue
         key = author_key(r["cite_author"])
         if not key:
             continue
@@ -451,9 +492,19 @@ def check_self_contradiction(store: Store) -> list[Finding]:
     return out
 
 
-def check_duplicate_bloat(store: Store) -> list[Finding]:
+def check_duplicate_bloat(store: Store,
+                          scope: set[str] | None = None) -> list[Finding]:
+    """Duplicate edges join two card ids, so scoping means checking that at
+    least one end belongs to you. `edges` carries no source_id, which is
+    precisely the shape the old connection-rewriting filter could not see."""
     rows = [dict(r) for r in store.conn.execute(
         "SELECT * FROM edges WHERE kind='duplicates'")]
+    if scope is not None:
+        mine = {r[0] for r in store.conn.execute(
+            "SELECT card_id FROM cards WHERE source_id IN "
+            f"({','.join('?' * len(scope))})", tuple(scope))} if scope else set()
+        rows = [r for r in rows
+                if r["src_node_id"] in mine or r["dst_node_id"] in mine]
     if len(rows) < 3:
         return []
     retagged = 0
@@ -502,13 +553,15 @@ def analyze_position(title: str, cards: list[dict],
     return findings
 
 
-def analyze_corpus(store: Store) -> list[Finding]:
+def analyze_corpus(store: Store, owner: str | None = None) -> list[Finding]:
+    """Corpus-level checks. Every one takes the scope explicitly."""
+    scope = scoped_source_ids(store, owner)
     findings: list[Finding] = []
-    findings += check_template_sources(store)
-    findings += check_answer_coverage(store)
-    findings += check_unanswered_positions(store)
-    findings += check_self_contradiction(store)
-    findings += check_duplicate_bloat(store)
+    findings += check_template_sources(store, scope)
+    findings += check_answer_coverage(store, scope)
+    findings += check_unanswered_positions(store, scope)
+    findings += check_self_contradiction(store, scope)
+    findings += check_duplicate_bloat(store, scope)
 
     # The same position title can appear in several ingested files. Collapse
     # identical findings so the report reads as arguments, not as rows.

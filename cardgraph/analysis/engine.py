@@ -30,13 +30,28 @@ from .schema import ContentionAnalysis, CorpusReport, Severity
 SMALL_CORPUS_CARDS = 200
 
 
-def _positions(store: Store) -> list[dict]:
+def _positions(store: Store, owner: str | None = None) -> list[dict]:
     """Nodes that represent a position someone runs: has cards, is not itself
-    an answer block."""
+    an answer block.
+
+    `owner` restricts to sources whose path matches a pattern, which is what
+    makes the analysis mean anything on a shared corpus. Every check here is
+    phrased as "your files" -- your sources, your contradictions, the answers
+    *you* have no response to. Run unscoped over the published archive that
+    becomes 46,712 positions belonging to 11,643 different teams and 129,410
+    findings about other people's evidence, which is not a report anyone can
+    act on. Scoping is not a display convenience; it is what the questions
+    assume.
+    """
+    sql = "SELECT * FROM nodes WHERE card_count > 0"
+    params: list = []
+    if owner:
+        sql += (" AND source_id IN (SELECT source_id FROM sources "
+                "WHERE path LIKE ? OR title LIKE ?)")
+        params += [f"%{owner}%", f"%{owner}%"]
+    sql += " ORDER BY card_count DESC"
     out = []
-    for r in store.conn.execute(
-        "SELECT * FROM nodes WHERE card_count > 0 ORDER BY card_count DESC"
-    ):
+    for r in store.conn.execute(sql, params):
         n = dict(r)
         if answers_target(n["title"]):
             continue
@@ -68,6 +83,7 @@ def analyze(
     llm: LLM | None = None,
     max_positions: int = 8,
     min_cards: int = 1,
+    owner: str | None = None,
     use_llm: bool = True,
     generate_blocks: bool = True,
     coverage_floor: float = 0.35,
@@ -91,13 +107,15 @@ def analyze(
     # ---- deterministic, always -------------------------------------------
     say("running deterministic checks")
     newest = det.corpus_newest_year(store)
-    report.corpus_findings = det.analyze_corpus(store)
+    report.corpus_findings = det.analyze_corpus(store, owner=owner)
+    if owner:
+        say(f"scoped to sources matching {owner!r}")
 
     # Unfilled outline templates are excluded: they are tags without evidence,
     # and scoring them produces a wall of true-but-useless findings that buries
     # the real ones. check_template_sources reports them once, above.
     templates = set(det.template_sources(store))
-    positions = [p for p in _positions(store)
+    positions = [p for p in _positions(store, owner=owner)
                  if p["card_count"] >= min_cards
                  and p.get("source_id") not in templates]
     if templates:
@@ -208,6 +226,7 @@ def analyze(
                         if f.severity is Severity.CRITICAL),
         "major": sum(1 for f in report.all_findings()
                      if f.severity is Severity.MAJOR),
+        "owner": owner,
         "generated_blocks": len(report.generated_blocks),
         "blocks_already_covered": sum(1 for b in report.generated_blocks if b.have_it),
         "blocks_partial": sum(1 for b in report.generated_blocks
@@ -233,12 +252,18 @@ def _wrap(text: str, width: int) -> list[str]:
 
 
 def render_text(report: CorpusReport, max_positions: int = 10,
-                verbose: bool = False) -> str:
+                verbose: bool = False, corpus_per_kind: int = 3,
+                findings_per_position: int = 6) -> str:
     L: list[str] = []
     s = report.stats
     L.append("=" * 72)
     L.append("CARDGRAPH ANALYSIS")
     L.append("=" * 72)
+    if s.get("owner"):
+        L.append(f"scope              : sources matching {s['owner']!r}")
+    else:
+        L.append("scope              : every source in the index "
+                 "(use --owner to restrict to your own files)")
     L.append(f"positions analyzed : {s.get('positions_analyzed', 0)}"
              f"   (model pass on {s.get('positions_model_analyzed', 0)})")
     L.append(f"findings           : {s.get('total_findings', 0)}"
@@ -256,14 +281,31 @@ def render_text(report: CorpusReport, max_positions: int = 10,
     if report.corpus_findings:
         L.append("CORPUS-WIDE")
         L.append("-" * 72)
-        for f in sorted(report.corpus_findings, key=lambda x: x.sort_key):
-            L.append(f"{_SEV_MARK[f.severity]} {f.title}")
-            L.append(f"     {f.detail}")
-            if f.fix:
-                L.append(f"     fix: {f.fix}")
-            L.append("")
+        ordered = sorted(report.corpus_findings, key=lambda x: x.sort_key)
+        # A report is something a person reads. Unscoped over the archive this
+        # section held 6,634 findings, which is a database dump wearing a
+        # report's clothes. Show the worst few per kind and count the rest.
+        by_kind: dict[str, list] = {}
+        for f in ordered:
+            by_kind.setdefault(f.kind, []).append(f)
+        for kind, group in sorted(
+                by_kind.items(), key=lambda kv: -kv[1][0].severity.rank):
+            shown = group[:corpus_per_kind]
+            for f in shown:
+                L.append(f"{_SEV_MARK[f.severity]} {f.title}")
+                L.append(f"     {f.detail}")
+                if f.fix:
+                    L.append(f"     fix: {f.fix}")
+                L.append("")
+            if len(group) > len(shown):
+                L.append(f"     … and {len(group) - len(shown)} more "
+                         f"{kind.replace('_', ' ')} finding(s)")
+                L.append("")
 
-    L.append("POSITIONS, WORST FIRST")
+    total_pos = len(report.contentions)
+    L.append(f"POSITIONS, WORST FIRST"
+             + (f"  (showing {min(max_positions, total_pos)} of {total_pos})"
+                if total_pos > max_positions else ""))
     L.append("-" * 72)
     for ca in report.contentions[:max_positions]:
         L.append(f"\n[{ca.side}] {ca.title}")
@@ -288,9 +330,10 @@ def render_text(report: CorpusReport, max_positions: int = 10,
                     L.append(f"            {link.note}")
         if not ca.findings:
             L.append("     no findings")
-        for f in sorted(ca.findings, key=lambda x: x.sort_key):
-            if not verbose and f.severity is Severity.INFO:
-                continue
+        pos_findings = [f for f in sorted(ca.findings, key=lambda x: x.sort_key)
+                        if verbose or f.severity is not Severity.INFO]
+        hidden = max(0, len(pos_findings) - findings_per_position)
+        for f in pos_findings[:findings_per_position]:
             flag = "" if f.grounded else "  [ungrounded]"
             L.append(f"{_SEV_MARK[f.severity]} {f.title}{flag}")
             L.append(f"     {f.detail}")
@@ -299,6 +342,8 @@ def render_text(report: CorpusReport, max_positions: int = 10,
             if verbose and f.grounding_notes:
                 for n in f.grounding_notes:
                     L.append(f"     · {n}")
+        if hidden:
+            L.append(f"     … and {hidden} more finding(s) on this position")
 
     if report.generated_blocks:
         L.append("")

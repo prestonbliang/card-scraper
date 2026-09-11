@@ -279,7 +279,48 @@ earned itself immediately: without it the archive would have produced 1,797
 identical "nothing is underlined" findings, all true, burying everything worth
 reading.
 
-## 11. What this does not do
+## 11. Scope: whose files are these?
+
+Every check in this layer is phrased as a question about *your* files — your
+sources, your contradictions, the answers *you* have no response to. That
+assumption is invisible until the corpus is shared, and then it breaks loudly.
+
+Run unscoped over the published archive, `analyze` reports **46,712 positions
+belonging to 11,643 different teams and 129,410 findings** about other people's
+evidence. Nothing in that report is false. None of it is actionable.
+
+`--owner PATTERN` restricts to sources whose path or title matches. Scoped to
+one school: 752 positions, 2,315 findings, in 1.5 seconds instead of 99.
+
+**How that filter is implemented matters, and the first attempt was wrong.**
+It wrapped the database connection and spliced `source_id IN (...)` into any SQL
+mentioning `cards` or `nodes`. Clever, and it silently missed two checks:
+`check_duplicate_bloat` queries `edges`, which has no `source_id` column at all,
+and `check_template_sources` queries `sources`. So a report scoped to Apple
+Valley still announced 21,811 duplicate pairs and 27 unfilled outline files —
+belonging to everyone else, presented as theirs. That is the same failure the
+rest of this document is about: confidently attributing something the system
+never established.
+
+The scope is now an explicit parameter on every corpus check, and
+`TestEveryCorpusCheckIsScoped` asserts it mechanically — both that each check
+accepts it and that `analyze_corpus` actually passes it — so a new check that
+forgets fails there rather than quietly attributing the archive to you.
+
+A related crash came from the same code: a typo in `--owner` matched no sources,
+the wrapper short-circuited to a query of a different shape, and a
+`COUNT(*)...fetchone()[0]` hit `None`. A mistyped filter should produce an empty
+report, not a traceback, and never — the worse outcome — silently widen back to
+everything.
+
+## 12. Report volume
+
+129,410 findings is a database dump wearing a report's clothes. Corpus findings
+are grouped by kind with the worst few shown per kind, positions are capped, and
+every truncation states what it hid. Truncation the reader cannot see is worse
+than a long report.
+
+## 13. What this does not do
 
 - It does not judge whether an argument is *true* — only whether your cards
   establish what your tags claim.

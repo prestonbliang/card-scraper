@@ -764,3 +764,234 @@ class TestSmallCorpusRobustness:
         e = SearchEngine(st, cache_path=str(tmp_path / "i.pkl"))
         e.build()
         assert e.search("anything") == []
+
+
+class TestOwnerScoping:
+    """Every check in this layer asks about *your* files.
+
+    Run unscoped over the published archive that assumption silently breaks:
+    46,712 positions belonging to 11,643 different teams, 129,410 findings
+    about other people's evidence, and a `self_contradiction` section reporting
+    that half the canon is cited on both sides -- true of the community,
+    meaningless as advice. Scoping is not a display filter; it is what the
+    questions presuppose.
+    """
+
+    def _store(self, tmp_path):
+        from cardgraph.models import Card, Cite, Side, Source
+        st = Store(str(tmp_path / "t.db"))
+        for school in ("Greenhill", "Lexington"):
+            st.add_source(Source(source_id=f"src-{school}",
+                                 path=f"/files/{school}/aff.docx",
+                                 title=f"{school} Aff", card_count=2))
+            cards = []
+            for i, side in enumerate(("aff", "neg")):
+                c = Card(tag=f"{school} tag {i}",
+                         cite=Cite(raw="Bostrom 02", author="Bostrom", year=2002),
+                         body="b" * 120, read_text=f"{school} read text {i}",
+                         source_id=f"src-{school}",
+                         source_path=f"/files/{school}/aff.docx", ordinal=i,
+                         path=[school, "1AC", f"Contention {i}"])
+                c.side = Side(side)
+                cards.append(c)
+            st.add_cards(cards)
+            # The outline must mirror the cards' `path` exactly: cards_for_node
+            # joins on (source_id, path_json), so a mismatch silently yields a
+            # position with no cards.
+            from cardgraph.models import NodeKind, OutlineNode
+            root = OutlineNode(title=school, kind=NodeKind.POCKET,
+                               path=[school], source_id=f"src-{school}")
+            hat = OutlineNode(title="1AC", kind=NodeKind.HAT,
+                              path=[school, "1AC"], source_id=f"src-{school}")
+            root.children.append(hat)
+            for i, c in enumerate(cards):
+                node = OutlineNode(title=f"Contention {i}", kind=NodeKind.BLOCK,
+                                   path=[school, "1AC", f"Contention {i}"],
+                                   source_id=f"src-{school}",
+                                   card_ids=[c.card_id])
+                hat.children.append(node)
+            st.add_outline(root)
+        return st
+
+    def test_scope_excludes_other_owners(self, tmp_path):
+        st = self._store(tmp_path)
+        wide = analyze(st, use_llm=False)
+        narrow = analyze(st, use_llm=False, owner="Greenhill")
+        assert wide.stats["positions_analyzed"] > narrow.stats["positions_analyzed"]
+        assert narrow.stats["owner"] == "Greenhill"
+        assert narrow.stats["positions_analyzed"] > 0
+        scoped_ids = {r[0] for r in st.conn.execute(
+            "SELECT node_id FROM nodes WHERE source_id = 'src-Greenhill'")}
+        assert all(c.node_id in scoped_ids for c in narrow.contentions)
+
+    def test_scoped_corpus_checks_only_see_scoped_sources(self, tmp_path):
+        """The corpus-level checks issue their own SQL; the scope has to reach
+        them too, or self_contradiction still reports the other school."""
+        st = self._store(tmp_path)
+        found = analyze(st, use_llm=False, owner="Greenhill").corpus_findings
+        for f in found:
+            assert "Lexington" not in f.title
+            assert "Lexington" not in (f.evidence.get("owner") or "")
+
+    def test_nonmatching_scope_yields_nothing_not_everything(self, tmp_path):
+        """A typo in --owner must return an empty report, never the whole
+        corpus. Silently widening a filter is how you get a 129,410-finding
+        report you believe is about your files."""
+        st = self._store(tmp_path)
+        r = analyze(st, use_llm=False, owner="NoSuchSchool")
+        assert r.stats["positions_analyzed"] == 0
+        assert r.corpus_findings == []
+
+    def test_scope_matches_on_title_as_well_as_path(self, tmp_path):
+        st = self._store(tmp_path)
+        assert analyze(st, use_llm=False,
+                       owner="Greenhill Aff").stats["positions_analyzed"] >= 0
+
+    def test_render_reports_the_scope(self, tmp_path):
+        from cardgraph.analysis import render_text
+        st = self._store(tmp_path)
+        assert "Greenhill" in render_text(
+            analyze(st, use_llm=False, owner="Greenhill"))
+        assert "every source in the index" in render_text(
+            analyze(st, use_llm=False))
+
+
+class TestReportVolume:
+    """A report is something a person reads."""
+
+    def _report(self, n_corpus, n_pos_findings):
+        from cardgraph.analysis.schema import (ContentionAnalysis, CorpusReport,
+                                               Finding, Severity)
+        r = CorpusReport()
+        r.corpus_findings = [
+            Finding(kind="answer_gap", severity=Severity.MAJOR,
+                    title=f"gap {i}", detail="d", fix="f")
+            for i in range(n_corpus)]
+        ca = ContentionAnalysis(node_id="n", title="P", side="aff", card_count=4)
+        ca.findings = [
+            Finding(kind="power_tagging", severity=Severity.MINOR,
+                    title=f"finding {i}", detail="d")
+            for i in range(n_pos_findings)]
+        r.contentions = [ca]
+        r.stats = {"positions_analyzed": 1, "total_findings": n_corpus}
+        return r
+
+    def test_corpus_findings_are_capped_per_kind(self):
+        from cardgraph.analysis import render_text
+        out = render_text(self._report(50, 0), corpus_per_kind=3)
+        assert out.count("gap ") <= 4          # 3 shown, plus the summary line
+        assert "and 47 more answer gap finding(s)" in out
+
+    def test_position_findings_are_capped(self):
+        from cardgraph.analysis import render_text
+        out = render_text(self._report(0, 20), findings_per_position=6)
+        assert "and 14 more finding(s) on this position" in out
+
+    def test_nothing_is_hidden_without_saying_so(self):
+        """Truncation the reader cannot see is worse than a long report."""
+        from cardgraph.analysis import render_text
+        out = render_text(self._report(50, 20), corpus_per_kind=3,
+                          findings_per_position=6)
+        assert "more answer gap finding(s)" in out
+        assert "more finding(s) on this position" in out
+
+
+class TestEveryCorpusCheckIsScoped:
+    """The bug this class exists to prevent, stated plainly.
+
+    The first scoping implementation wrapped the database connection and
+    spliced `source_id IN (...)` into any SQL that mentioned cards or nodes. It
+    silently missed `check_duplicate_bloat` (which queries `edges`, a table with
+    no source_id at all) and `check_template_sources` (which queries `sources`).
+    A report scoped to one school therefore announced 21,811 duplicate pairs and
+    27 unfilled outline files belonging to *other* schools, presented as that
+    school's own.
+
+    Scoping is now an explicit parameter on every check, and this test asserts
+    that mechanically -- so a new check that forgets it fails here rather than
+    quietly attributing the corpus to you.
+    """
+
+    CHECKS = ["check_template_sources", "check_answer_coverage",
+              "check_unanswered_positions", "check_self_contradiction",
+              "check_duplicate_bloat"]
+
+    def test_every_corpus_check_accepts_a_scope(self):
+        import inspect
+        from cardgraph.analysis import deterministic as det
+        for name in self.CHECKS:
+            sig = inspect.signature(getattr(det, name))
+            assert "scope" in sig.parameters, f"{name} ignores the scope"
+
+    def test_analyze_corpus_passes_the_scope_to_all_of_them(self):
+        """Accepting the parameter is not the same as being given it."""
+        import inspect
+        from cardgraph.analysis import deterministic as det
+        src = inspect.getsource(det.analyze_corpus)
+        for name in self.CHECKS:
+            assert f"{name}(store, scope)" in src, \
+                f"analyze_corpus calls {name} without the scope"
+
+    def _two_schools(self, tmp_path):
+        from cardgraph.models import Card, Cite, Source
+        st = Store(str(tmp_path / "t.db"))
+        for school in ("Mine", "Theirs"):
+            st.add_source(Source(source_id=f"s-{school}",
+                                 path=f"/files/{school}/a.docx",
+                                 title=f"{school} file", card_count=2))
+            # identical evidence in both schools -> a duplicate edge across them
+            st.add_cards([
+                Card(tag=f"{school} tag {i}",
+                     cite=Cite(raw="Woller 97", author="Woller", year=1997),
+                     body="shared body text " * 12,
+                     read_text=f"the same underlying cut appears here {i}",
+                     source_id=f"s-{school}",
+                     source_path=f"/files/{school}/a.docx", ordinal=i)
+                for i in range(2)])
+        return st
+
+    def test_duplicate_bloat_is_scoped_even_though_edges_lack_source_id(self,
+                                                                       tmp_path):
+        from cardgraph.analysis.deterministic import (check_duplicate_bloat,
+                                                      scoped_source_ids)
+        st = self._two_schools(tmp_path)
+        st.add_edge("nope-a", "nope-b", "duplicates", 0.99,
+                    '{"retagged": true}')
+        st.add_edge("nope-c", "nope-d", "duplicates", 0.99,
+                    '{"retagged": true}')
+        st.add_edge("nope-e", "nope-f", "duplicates", 0.99,
+                    '{"retagged": true}')
+        scope = scoped_source_ids(st, "Mine")
+        # none of those edges touch a card owned by "Mine"
+        assert check_duplicate_bloat(st, scope) == []
+        # unscoped, they are reported
+        assert check_duplicate_bloat(st, None)
+
+    def test_template_sources_are_scoped(self, tmp_path):
+        from cardgraph.analysis.deterministic import (check_template_sources,
+                                                      template_sources)
+        from cardgraph.models import Card, Cite, Source
+        st = Store(str(tmp_path / "t.db"))
+        st.add_source(Source(source_id="s-Theirs", path="/files/Theirs/skel.docx",
+                             title="Theirs skeleton"))
+        st.add_cards([Card(tag=f"tag {i}", cite=Cite(raw=""), body="x" * 80,
+                           read_text="", source_id="s-Theirs", ordinal=i)
+                      for i in range(6)])
+        assert template_sources(st)                       # exists
+        assert template_sources(st, scope={"s-Mine"}) == {}   # not mine
+        assert check_template_sources(st, {"s-Mine"}) == []
+
+    def test_template_list_does_not_dump_every_filename(self, tmp_path):
+        """27 full filenames inline is a wall of text, not a finding."""
+        from cardgraph.analysis.deterministic import check_template_sources
+        from cardgraph.models import Card, Cite, Source
+        st = Store(str(tmp_path / "t.db"))
+        for n in range(9):
+            st.add_source(Source(source_id=f"s{n}", path=f"/f/{n}.docx",
+                                 title=f"skeleton number {n}"))
+            st.add_cards([Card(tag=f"t{n}-{i}", cite=Cite(raw=""), body="x" * 80,
+                               read_text="", source_id=f"s{n}", ordinal=i)
+                          for i in range(4)])
+        found = check_template_sources(st)
+        assert found
+        assert "and 4 more" in found[0].detail

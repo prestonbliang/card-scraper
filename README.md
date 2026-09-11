@@ -14,7 +14,7 @@ pip install -r requirements.txt
 python -m cardgraph.cli ingest local ./my-files        # your own .docx
 python -m cardgraph.cli ingest-opendebate --query "data center" --limit 3000
 python -m cardgraph.cli graph                          # build answer edges
-python -m cardgraph.cli analyze --top 5                # find what breaks
+python -m cardgraph.cli analyze --owner Greenhill --top 5   # find what breaks
 python -m cardgraph.cli serve                          # http://127.0.0.1:8000
 ```
 
@@ -202,6 +202,13 @@ Regression tests for every one of these live in
 `tests/test_authors.py`, and `TestIndexPersistence` /
 `TestSmallCorpusRobustness` in `tests/test_analysis.py`.
 
+**Scope your own files.** Every check asks about *your* evidence. Unscoped over
+the archive that is 46,712 positions across 11,643 teams and 129,410 findings
+about other people — all true, none actionable. `--owner Greenhill` gives 752
+positions and 2,315 findings in 1.5s instead of 99s. See
+[ANALYSIS.md §11](ANALYSIS.md) for why the first implementation of that filter
+silently leaked other schools' data into your report.
+
 **At full scale:** ingest 11,643 files in 58 min · graph build 2m34s (40,518
 answer edges, 31,011 duplicate edges) · index fit 3m52s once, 6s warm · search
 1.8s · UI first paint 0.5s · 23,214 distinct authors.
@@ -272,7 +279,7 @@ cardgraph/
   api/main.py          FastAPI, localhost by default
 web/index.html         single-file UI: search, browse, analysis
 seed/                  synthetic fixture + moratorium skeleton
-tests/                 148 tests; the grounding suite is the important one
+tests/                 161 tests; the grounding suite is the important one
 ```
 
 ## Notes on running it as a service
