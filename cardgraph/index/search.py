@@ -311,6 +311,7 @@ class SearchEngine:
         return hits
 
     def covers(self, query: str, *, exclude_card_ids: set[str] | None = None,
+               restrict_to: set[str] | None = None,
                floor: float = 0.35, k: int = 5) -> list[tuple[str, float]]:
         """Does the corpus already contain evidence for `query`?
 
@@ -331,6 +332,13 @@ class SearchEngine:
           the cards *inside that position* are not candidates. Without this,
           every position trivially "answers" itself.
 
+        `restrict_to` limits candidates to a set of card ids -- the third and
+        last correction. "Do I have this?" means *I*, and on a shared corpus the
+        index holds 11,643 other teams' files. Without it, an analysis scoped to
+        one school answered "you already have cards for this" by pointing at
+        another school's evidence, which is the same misattribution the scope
+        parameter exists to prevent.
+
         The floor is a judgment call and depends on corpus breadth. It is a
         parameter, it is reported alongside each match, and `analysis/engine.py`
         surfaces the score so you can see how strong "you have this" really is.
@@ -338,9 +346,15 @@ class SearchEngine:
         if not self._built:
             self.build()
         exclude = exclude_card_ids or set()
+        # When restricted, scan deeper: the owner's cards may sit well below the
+        # global top-k on a corpus this size, and stopping early would report
+        # "not in your files" for evidence that is.
+        depth = k + len(exclude) + (400 if restrict_to is not None else 10)
         out: list[tuple[str, float]] = []
-        for cid, score in self.vectors.query(query, k=k + len(exclude) + 10):
+        for cid, score in self.vectors.query(query, k=depth):
             if cid in exclude:
+                continue
+            if restrict_to is not None and cid not in restrict_to:
                 continue
             if score < floor:
                 continue

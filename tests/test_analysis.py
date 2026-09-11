@@ -995,3 +995,65 @@ class TestEveryCorpusCheckIsScoped:
         found = check_template_sources(st)
         assert found
         assert "and 4 more" in found[0].detail
+
+
+class TestCoverageRespectsScope:
+    """"Do I have a card for this?" means *I*.
+
+    Third instance of one bug. Ranked search answered it with its top-k for any
+    query (§5). A boolean then reported a 0.41 cosine as coverage (§5). And on a
+    shared index, an analysis scoped to one school answered it by pointing at
+    *another school's* cards -- telling Apple Valley they were covered by
+    Lexington's evidence. Eight confident "you already have cards for this"
+    claims on a real run, every one of them about files that school does not own.
+    """
+
+    def _engine(self, tmp_path):
+        from cardgraph.models import Card, Cite, Source
+        st = Store(str(tmp_path / "t.db"))
+        for school in ("Mine", "Theirs"):
+            st.add_source(Source(source_id=f"s-{school}",
+                                 path=f"/files/{school}/a.docx",
+                                 title=f"{school} file", card_count=3))
+            st.add_cards([
+                Card(tag=f"{school} tag {i}", cite=Cite(raw=f"A{i} 20"),
+                     body="b" * 120,
+                     read_text=f"{school} claim about reserve margin shortfalls {i}",
+                     source_id=f"s-{school}",
+                     source_path=f"/files/{school}/a.docx", ordinal=i)
+                for i in range(3)])
+        e = SearchEngine(st, cache_path=str(tmp_path / "i.pkl"))
+        e.build()
+        return st, e
+
+    def test_restrict_to_excludes_other_owners_cards(self, tmp_path):
+        st, e = self._engine(tmp_path)
+        mine = {r[0] for r in st.conn.execute(
+            "SELECT card_id FROM cards WHERE source_id='s-Mine'")}
+        q = "reserve margin shortfalls"
+        assert e.covers(q, floor=0.0), "unrestricted finds something"
+        hits = e.covers(q, restrict_to=mine, floor=0.0)
+        assert hits, "the owner does have matching cards"
+        assert all(cid in mine for cid, _ in hits)
+
+    def test_restrict_to_empty_set_means_nothing_is_covered(self, tmp_path):
+        """An owner with no cards is covered by nothing -- never by everything.
+        Treating an empty restriction as 'no restriction' is how a filter
+        silently widens back to the whole corpus."""
+        _, e = self._engine(tmp_path)
+        assert e.covers("reserve margin shortfalls",
+                        restrict_to=set(), floor=0.0) == []
+
+    def test_none_restriction_still_searches_everything(self, tmp_path):
+        _, e = self._engine(tmp_path)
+        assert e.covers("reserve margin shortfalls", restrict_to=None, floor=0.0)
+
+    def test_small_corpus_guard_counts_the_scope_not_the_index(self, tmp_path):
+        """Scoped to thirty cards inside a 166,816-card archive, the pool that
+        can answer "do I have this?" is thirty. Using the index total reports
+        confident coverage from a sample far too small to support it."""
+        import inspect
+        from cardgraph.analysis import engine as eng
+        src = inspect.getsource(eng.analyze)
+        assert "len(scope_ids) if scope_ids is not None" in src, \
+            "small_corpus must be measured over the scope"

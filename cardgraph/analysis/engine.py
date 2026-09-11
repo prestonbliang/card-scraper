@@ -152,22 +152,43 @@ def analyze(
             engine = SearchEngine(store)
             engine.build()
 
+        # "Do I have a card for this?" means *I*. Scoped to an owner, only that
+        # owner's cards can answer it -- otherwise the report tells one school
+        # they are covered by another school's evidence.
+        scope_ids: set[str] | None = None
+        if owner:
+            src = det.scoped_source_ids(store, owner) or set()
+            if src:
+                scope_ids = {r[0] for r in store.conn.execute(
+                    "SELECT card_id FROM cards WHERE source_id IN "
+                    f"({','.join('?' * len(src))})", tuple(src))}
+            else:
+                scope_ids = set()
+
         def make_search_fn(own_ids: set[str]):
-            # Coverage check, not ranked search, and never against the
-            # position's own cards -- see SearchEngine.covers.
+            # Coverage check, not ranked search; never against the position's
+            # own cards; and never outside the scope -- see SearchEngine.covers.
             def fn(q: str):
                 return engine.covers(q, exclude_card_ids=own_ids,
+                                     restrict_to=scope_ids,
                                      floor=coverage_floor, k=4)
             return fn
 
         # On a small index the SVD space is degenerate and cosines inflate,
         # so every proposal looks half-covered. Below this many cards we refuse
         # to claim coverage at all and downgrade every match to "partial".
-        total_cards = store.stats()["cards"]
+        #
+        # Counted over the SCOPE, not the index. Scoped to a school with thirty
+        # cards inside a 166,816-card archive, the corpus that can actually
+        # answer "do I have this?" is those thirty -- using the index total
+        # reports confident coverage from a pool far too small to support it.
+        total_cards = (len(scope_ids) if scope_ids is not None
+                       else store.stats()["cards"])
         small_corpus = total_cards < SMALL_CORPUS_CARDS
         if small_corpus:
             report.warnings.append(
-                f"Corpus has only {total_cards} cards; similarity scores are "
+                f"{'Scope' if scope_ids is not None else 'Corpus'} has only "
+                f"{total_cards} cards; similarity scores are "
                 f"not reliable at this size, so no proposed block is reported "
                 f"as covered — all matches are shown as 'possibly related'. "
                 f"Ingest more files for coverage claims to mean anything.")
