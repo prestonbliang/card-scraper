@@ -4,7 +4,7 @@
 
 ```bash
 pip install -r requirements.txt
-pytest tests/ -q          # 79 tests, offline, no API key, ~2.5s
+pytest tests/ -q          # offline regression suite
 ruff check .
 ```
 

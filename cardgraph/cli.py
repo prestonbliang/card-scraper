@@ -2,8 +2,8 @@
 
     python -m cardgraph.cli ingest local ./my-files
     python -m cardgraph.cli ingest git https://github.com/ashtarcommunications/caselist-archive
-    python -m cardgraph.cli ingest openev https://openev.debatecoaches.org/
-    python -m cardgraph.cli ingest opendebate --query "data center" --limit 2000
+    python -m cardgraph.cli ingest online https://openev.debatecoaches.org/
+    python -m cardgraph.cli ingest-opendebate --query "data center" --limit 2000
     python -m cardgraph.cli graph
     python -m cardgraph.cli analyze --top 5
     python -m cardgraph.cli analyze --owner Greenhill --top 5
@@ -25,7 +25,8 @@ from .graph.relate import build_all
 from .index.search import SearchEngine
 from .index.store import Store
 from .ingest.base import (CaselistArchiveAdapter, GitRepoAdapter,
-                          LocalDirAdapter, OpenEvidenceAdapter)
+                          LocalDirAdapter, OnlineEvidenceAdapter,
+                          OpenEvidenceAdapter)
 from .ingest.policy import AccessPolicy, AccessRefused, explain_allowlist
 from .parse.docx_card import UnsupportedFormat, parse_any
 
@@ -41,8 +42,15 @@ def cmd_ingest(args) -> int:
     elif args.kind == "caselist-archive":
         adapter = CaselistArchiveAdapter(workdir=args.workdir, policy=policy)
     elif args.kind == "openev":
-        adapter = OpenEvidenceAdapter(index_url=args.target, workdir=args.workdir,
-                                      policy=policy)
+        adapter = OpenEvidenceAdapter(
+            index_url=args.target or "https://openev.debatecoaches.org/",
+            stealth=args.stealth, workdir=args.workdir, policy=policy,
+        )
+    elif args.kind == "online":
+        adapter = OnlineEvidenceAdapter(index_url=args.target,
+                                        license=args.license,
+                                        stealth=args.stealth,
+                                        workdir=args.workdir, policy=policy)
     else:
         print(f"unknown source kind: {args.kind}", file=sys.stderr)
         return 2
@@ -197,7 +205,8 @@ def cmd_search(args) -> int:
     engine = SearchEngine(store)
     engine.build()
     hits = engine.search(args.query, k=args.k, side=args.side,
-                         author=args.author, min_read_ratio=args.min_read_ratio)
+                         author=args.author, min_read_ratio=args.min_read_ratio,
+                         source=args.source)
     if not hits:
         print("no results")
         return 0
@@ -236,10 +245,15 @@ def main(argv: list[str] | None = None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     i = sub.add_parser("ingest")
-    i.add_argument("kind", choices=["local", "git", "caselist-archive", "openev"])
+    i.add_argument("kind", choices=["local", "git", "caselist-archive", "openev",
+                                     "online"])
     i.add_argument("target", nargs="?", default="")
     i.add_argument("--workdir", default="data/corpus")
     i.add_argument("--limit", type=int, default=None)
+    i.add_argument("--license", default="verify source terms before use",
+                   help="attribution/license note recorded for online sources")
+    i.add_argument("--stealth", action="store_true",
+                   help="use Scrapling's browser path for a public site that permits access")
     i.add_argument("--force", action="store_true",
                    help="re-ingest files already in the database")
     i.set_defaults(func=cmd_ingest)
@@ -285,6 +299,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("-k", type=int, default=10)
     s.add_argument("--side", choices=["aff", "neg", "both", "unknown"])
     s.add_argument("--author")
+    s.add_argument("--source", help="filter by source id, title, origin, or path")
     s.add_argument("--min-read-ratio", type=float, dest="min_read_ratio")
     s.set_defaults(func=cmd_search)
 

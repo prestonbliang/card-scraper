@@ -7,5 +7,13 @@ data/
 *.db
 *.db-wal
 *.db-shm
+*.index
+*.tmp
+*.egg-info/
+build/
+dist/
 .pytest_cache/
+.ruff_cache/
+.coverage
+.freebuff/
 .DS_Store

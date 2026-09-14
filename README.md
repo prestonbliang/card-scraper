@@ -11,7 +11,9 @@ supports, and naming the answers you have no block for.
 ```bash
 pip install -r requirements.txt
 
-python -m cardgraph.cli ingest local ./my-files        # your own .docx
+python -m cardgraph.cli ingest local ./my-files        # your own .docx/.html
+python -m cardgraph.cli ingest online \
+    https://openev.debatecoaches.org/  # public index or direct file
 python -m cardgraph.cli ingest-opendebate --query "data center" --limit 3000
 python -m cardgraph.cli graph                          # build answer edges
 python -m cardgraph.cli analyze --owner Greenhill --top 5   # find what breaks
@@ -95,14 +97,28 @@ anyway — see below.
 | source | what it is | command |
 | --- | --- | --- |
 | **OpenDebateEvidence** | ~3.5M cards from OpenCaseList, published as a research dataset *with the project's blessing*, PII-anonymized ([arXiv:2406.14657](https://arxiv.org/abs/2406.14657)) | `ingest-opendebate` |
-| Open Evidence Project | camp files released for free community use | `ingest openev <url>` |
+| Open Evidence Project | camp files released for free community use | `ingest openev [url]` or `ingest online <public index-or-file-url>` |
+| public case release | an allowlisted HTML index or direct `.docx`, `.docm`, `.htm`, `.html`, or `.zip` URL | `ingest online <url>` |
 | `caselist-archive` | ~40,000 archived caselist wiki pages, 2013 onward | `ingest caselist-archive` |
 | your own files | no network, no questions | `ingest local <dir>` |
 
-OpenDebateEvidence is the important one. It is the same evidence the gated wiki
-holds, released deliberately as a dataset — and its schema includes a `spoken`
-field that is *already* the underlined portion, so the hardest step in the whole
-pipeline arrives pre-solved. Filter before you pull:
+`ingest online` accepts a public HTML index or a direct supported file URL. ZIP
+releases are unpacked safely, only supported debate documents are retained, and
+source URL/license metadata is stored with every imported file. Links to unknown
+or login-gated hosts are refused by the allowlist before a request is made.
+Use `--license` to record the source's attribution note and `--stealth` only when
+the public source permits access but its CDN blocks ordinary clients; stealth is
+not an authorization bypass.
+
+```bash
+python -m cardgraph.cli ingest online https://openev.debatecoaches.org/releases/ \
+    --limit 500 --license "Open Evidence Project terms; verify before redistribution"
+python -m cardgraph.cli search "households pay for transmission" \
+    --source openev --side aff
+```
+
+The API exposes the same provenance through `GET /api/sources`; `/api/search`
+returns `source_title`, `source_origin`, and `source_url` for each hit.
 
 ```bash
 python -m cardgraph.cli ingest-opendebate \
@@ -217,7 +233,7 @@ answer edges, 31,011 duplicate edges) · index fit 3m52s once, 6s warm · search
 
 ```bash
 pip install -r requirements.txt
-python -m pytest tests/ -q          # 78 tests, offline, ~2s
+python -m pytest tests/ -q          # offline regression suite
 ```
 
 Optional: Scrapling (`scrapling curl_cffi patchright browserforge`) for the
@@ -265,7 +281,7 @@ cardgraph/
   parse/authors.py     canonical author keys (one person, many spellings)
   ingest/policy.py     allowlist, tiers, robots, rate limiting
   ingest/fetch.py      Scrapling wrapper, urllib fallback
-  ingest/base.py       local / git / http-index / openev adapters
+  ingest/base.py       local / git / http-index / online / openev adapters
   ingest/opendebate.py OpenDebateEvidence streaming adapter
   index/store.py       SQLite schema, FTS5 over read_text
   index/search.py      BM25 + TF-IDF, RRF fusion, coverage check, cached index
@@ -279,7 +295,7 @@ cardgraph/
   api/main.py          FastAPI, localhost by default
 web/index.html         single-file UI: search, browse, analysis
 seed/                  synthetic fixture + moratorium skeleton
-tests/                 161 tests; the grounding suite is the important one
+tests/                 regression suite; the grounding and ingest suites are the important ones
 ```
 
 ## Notes on running it as a service

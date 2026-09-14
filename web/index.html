@@ -10,6 +10,7 @@
   --bg:#fbfbfa; --panel:#fff; --ink:#1a1a19; --muted:#6b6b66; --line:#e3e2de;
   --accent:#2f5d50; --accent-soft:#e8f0ed; --read:#fff3bf; --emph:#ffd43b;
   --aff:#2f5d50; --neg:#8a3324; --warn:#9a6700; --warn-bg:#fff8e1;
+  --panel-alt:#f4f6f3; --shadow:0 10px 30px rgba(26,26,25,.06);
   --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
   --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
   --serif:"Iowan Old Style","Palatino Linotype",Georgia,serif;
@@ -19,6 +20,7 @@
     --bg:#16171a; --panel:#1d1f23; --ink:#e8e6e3; --muted:#9a9791; --line:#2e3137;
     --accent:#7fb3a1; --accent-soft:#22302b; --read:#3d3517; --emph:#5c4d10;
     --aff:#7fb3a1; --neg:#d99177; --warn:#d9a441; --warn-bg:#2b2410;
+    --panel-alt:#25282c; --shadow:0 10px 30px rgba(0,0,0,.18);
   }
 }
 *{box-sizing:border-box}
@@ -30,14 +32,19 @@ header{
   display:flex;align-items:center;gap:16px;padding:12px 18px;
   border-bottom:1px solid var(--line);background:var(--panel);
   position:sticky;top:0;z-index:10;flex-wrap:wrap;
+  box-shadow:var(--shadow);
 }
 .brand{font-weight:700;letter-spacing:-.02em;font-size:16px}
 .brand span{color:var(--muted);font-weight:400;font-size:12px;margin-left:8px}
-.searchwrap{flex:1;min-width:260px;display:flex;gap:8px}
+.searchwrap{flex:1;min-width:260px;display:flex;gap:8px;flex-wrap:wrap}
+.searchwrap input[type=search]{min-width:220px}
 input[type=search],select{
   font:inherit;padding:8px 11px;border:1px solid var(--line);border-radius:7px;
   background:var(--bg);color:var(--ink);
 }
+.searchbtn{border:1px solid var(--accent);background:var(--accent);color:#fff;
+  border-radius:7px;padding:8px 13px;font-weight:600}
+.searchbtn:hover{filter:brightness(1.08)}
 input[type=search]{flex:1}
 input[type=search]:focus,select:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
 .stats{font-size:12px;color:var(--muted);font-family:var(--mono);white-space:nowrap}
@@ -75,8 +82,9 @@ body.analysis #content{max-width:1180px}
       padding:14px 16px;margin-bottom:12px}
 .card h3{margin:0 0 6px;font-size:15px;line-height:1.4;font-weight:650;cursor:pointer}
 .card h3:hover{color:var(--accent)}
-.cite{font-family:var(--mono);font-size:11.5px;color:var(--muted);
-      margin-bottom:9px;word-break:break-word}
+.source-line{font-size:11px;color:var(--muted);margin-top:8px;display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+.source-line a{font-family:var(--mono);font-size:10.5px}
+.source-tag{font-family:var(--mono);font-size:10px;padding:2px 6px;border-radius:4px;background:var(--panel-alt);color:var(--muted)}
 .read{font-family:var(--serif);font-size:15.5px;line-height:1.6;
       background:var(--read);padding:2px 0;box-decoration-break:clone}
 .readbox{margin:8px 0 0}
@@ -176,11 +184,13 @@ h4.sec{font-size:11px;text-transform:uppercase;letter-spacing:.09em;
 <header>
   <div class="brand">cardgraph<span>debate evidence index</span></div>
   <div class="searchwrap">
-    <input type="search" id="q" placeholder="Search read text — try an argument, not a keyword" autocomplete="off">
+    <input type="search" id="q" placeholder="Search public cases, cards, and arguments…" autocomplete="off">
     <select id="side">
       <option value="">any side</option><option value="aff">aff</option>
       <option value="neg">neg</option><option value="unknown">unclassified</option>
     </select>
+    <input type="search" id="source" placeholder="source / school / year" autocomplete="off" aria-label="Filter by source">
+    <button class="searchbtn" id="searchBtn">Search</button>
   </div>
   <div class="modes">
     <button id="mSearch" aria-pressed="true">Search</button>
@@ -242,6 +252,17 @@ function cardEl(c, opts = {}){
   h.onclick = () => showCard(c.card_id);
   n.append(h);
   if (c.cite_raw) n.append(el("div", "cite", c.cite_raw));
+  if (c.source_title || c.source_origin){
+    const line = el("div", "source-line");
+    line.append(el("span", "source-tag", c.source_origin || "online"));
+    line.append(document.createTextNode(c.source_title || c.source_id || ""));
+    if (c.source_url){
+      const a = el("a", null, "open source");
+      a.href = c.source_url; a.target = "_blank"; a.rel = "noreferrer";
+      line.append(a);
+    }
+    n.append(line);
+  }
   if (c.read_text){
     const rb = el("div", "readbox");
     rb.append(el("span", "read", c.read_text));
@@ -261,18 +282,25 @@ function cardEl(c, opts = {}){
 let timer;
 $("#q").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(doSearch, 220); });
 $("#side").addEventListener("change", doSearch);
+$("#source").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(doSearch, 220); });
+$("#searchBtn").addEventListener("click", doSearch);
+$("#q").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
 
 async function doSearch(){
   const q = $("#q").value.trim();
   if (!q){ renderWelcome(); return; }
   const side = $("#side").value;
+  const source = $("#source").value.trim();
   const c = $("#content");
-  c.innerHTML = '<div class="spin">searching…</div>';
-  const r = await api(`/api/search?q=${encodeURIComponent(q)}&k=25` + (side ? `&side=${side}` : ""));
+  c.innerHTML = '<div class="spin">searching public evidence…</div>';
+  const params = new URLSearchParams({ q, k: "25" });
+  if (side) params.set("side", side);
+  if (source) params.set("source", source);
+  const r = await api(`/api/search?${params}`);
   c.innerHTML = "";
   c.append(el("div", "crumb", `${r.count} result${r.count===1?"":"s"} for "${q}"`));
   if (!r.count){
-    c.append(el("div", "empty", "Nothing matched. Search runs over the read text — the underlined portion — so a phrase that only appears in unread context will not hit."));
+    c.append(el("div", "empty", "Nothing matched. Try the argument in different words, remove the source filter, or ingest a public speech-and-debate case release first."));
     return;
   }
   r.hits.forEach(h => c.append(cardEl(h, { rank: true })));
@@ -377,6 +405,18 @@ async function showCard(id){
   const box = el("div", "card detail");
   box.append(el("h3", null, d.tag));
   if (d.cite_raw) box.append(el("div", "cite", d.cite_raw));
+  if (d.source_title || d.source_origin){
+    const line = el("div", "source-line");
+    line.append(el("span", "source-tag", d.source_origin || "online"));
+    line.append(document.createTextNode(d.source_title || d.source_id || ""));
+    if (d.source_license) line.append(el("span", "source-tag", d.source_license));
+    if (d.source_url){
+      const a = el("a", null, "open source");
+      a.href = d.source_url; a.target = "_blank"; a.rel = "noreferrer";
+      line.append(a);
+    }
+    box.append(line);
+  }
 
   const tg = el("div", "toggle");
   const bRead = el("button", null, "Read text");
@@ -606,9 +646,9 @@ function renderWelcome(){
   const c = $("#content");
   c.innerHTML = "";
   const e = el("div", "empty");
-  e.append(el("h2", null, "Search the read text, not the document."));
-  const p1 = el("p", null, "Every card here is indexed on the portion that is actually underlined — what gets spoken in a round — rather than on the full quoted passage. Searching an argument in your own words usually works better than guessing the author's vocabulary.");
-  const p2 = el("p", null, "Or browse the outline on the left. Blocks beginning with “AT:” are linked to what they answer, across every file in the index.");
+  e.append(el("h2", null, "Search online speech-and-debate evidence."));
+  const p1 = el("p", null, "Searches combine exact text with semantic matching over read text, tags, citations, and public case releases. Use the source filter to narrow results to a school, archive, or season.");
+  const p2 = el("p", null, "To add public evidence, run `cardgraph ingest online <public index or file URL>` after checking its terms. Login-gated sources are intentionally not bypassed.");
   e.append(p1, p2);
   c.append(e);
 }

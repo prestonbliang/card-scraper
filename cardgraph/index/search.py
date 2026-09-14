@@ -46,6 +46,9 @@ class Hit:
     block: str | None
     side: str
     source_id: str
+    source_title: str = ""
+    source_origin: str = ""
+    source_url: str | None = None
     lexical_rank: int | None = None
     vector_rank: int | None = None
 
@@ -56,6 +59,8 @@ class Hit:
             "cite_raw": self.cite_raw, "block": self.block, "side": self.side,
             "source_id": self.source_id,
             "lexical_rank": self.lexical_rank, "vector_rank": self.vector_rank,
+            "source_title": self.source_title, "source_origin": self.source_origin,
+            "source_url": self.source_url,
         }
 
 
@@ -200,7 +205,8 @@ class VectorIndex:
         self.matrix = blob["matrix"]
         return True
 
-    def query(self, text: str, k: int = 50) -> list[tuple[str, float]]:
+    def query(self, text: str, k: int = 50,
+              allowed: set[str] | None = None) -> list[tuple[str, float]]:
         if self.matrix is None or self._vec is None or not self.card_ids:
             return []
         from sklearn.preprocessing import normalize
@@ -209,8 +215,15 @@ class VectorIndex:
         qd = self._svd.transform(q) if self._svd is not None else q.toarray()
         qd = normalize(qd).astype(self.matrix.dtype, copy=False)
         sims = (self.matrix @ qd.T).ravel()
+        if allowed is not None:
+            allowed_mask = np.fromiter(
+                (cid in allowed for cid in self.card_ids), dtype=bool,
+                count=len(self.card_ids),
+            )
+            sims[~allowed_mask] = -np.inf
         order = np.argsort(-sims)[:k]
-        return [(self.card_ids[i], float(sims[i])) for i in order]
+        return [(self.card_ids[i], float(sims[i])) for i in order
+                if np.isfinite(sims[i])]
 
 
 class SearchEngine:
@@ -241,30 +254,58 @@ class SearchEngine:
                 pass    # a cache we cannot write is not a reason to fail a search
         self._built = True
 
-    def _lexical(self, query: str, k: int) -> list[tuple[str, float]]:
+    def _lexical(self, query: str, k: int,
+                 source: str | None = None) -> list[tuple[str, float]]:
+        source_clause = ""
+        params: list[object] = [_fts_escape(query)]
+        if source:
+            source_clause = (
+                " AND lower(COALESCE(c.source_id, '') || ' ' || "
+                "COALESCE(src.title, '') || ' ' || COALESCE(src.origin, '') || ' ' || "
+                "COALESCE(c.source_path, '')) LIKE ?"
+            )
+            params.append(f"%{source.lower()}%")
+        params.append(k)
         try:
             rows = self.store.conn.execute(
-                """SELECT m.card_id AS card_id, bm25(cards_fts, 8.0, 4.0, 2.0, 1.0) AS s
+                """SELECT m.card_id AS card_id, bm25(cards_fts, 8.0, 4.0, 2.0, 1.0) AS score
                    FROM cards_fts
                    JOIN fts_map m ON m.rowid = cards_fts.rowid
-                   WHERE cards_fts MATCH ?
-                   ORDER BY s LIMIT ?""",
-                (_fts_escape(query), k),
+                   JOIN cards c ON c.card_id = m.card_id
+                   LEFT JOIN sources src ON src.source_id = c.source_id
+                   WHERE cards_fts MATCH ?""" + source_clause + " ORDER BY score LIMIT ?",
+                params,
             ).fetchall()
         except Exception:
             return []
-        return [(r["card_id"], -float(r["s"])) for r in rows]
+        return [(r["card_id"], -float(r["score"])) for r in rows]
 
     def search(self, query: str, k: int = 25, *, side: str | None = None,
                author: str | None = None, year_min: int | None = None,
                year_max: int | None = None, block: str | None = None,
-               min_read_ratio: float | None = None) -> list[Hit]:
+               min_read_ratio: float | None = None,
+               source: str | None = None) -> list[Hit]:
         if not self._built:
             self.build()
 
         pool = max(k * 4, 60)
-        lex = self._lexical(query, pool)
-        vec = self.vectors.query(query, pool)
+        allowed: set[str] | None = None
+        if source:
+            source_rows = self.store.conn.execute(
+                """SELECT c.card_id FROM cards c
+                   LEFT JOIN sources s ON s.source_id = c.source_id
+                   WHERE lower(COALESCE(c.source_id, '') || ' ' ||
+                              COALESCE(s.title, '') || ' ' ||
+                              COALESCE(s.origin, '') || ' ' ||
+                              COALESCE(c.source_path, '')) LIKE ?""",
+                (f"%{source.lower()}%",),
+            ).fetchall()
+            allowed = {r["card_id"] for r in source_rows}
+            if not allowed:
+                return []
+
+        lex = self._lexical(query, pool, source=source)
+        vec = self.vectors.query(query, pool, allowed=allowed)
 
         lex_rank = {cid: i + 1 for i, (cid, _) in enumerate(lex)}
         vec_rank = {cid: i + 1 for i, (cid, _) in enumerate(vec)}
@@ -280,7 +321,10 @@ class SearchEngine:
         ids = sorted(fused, key=lambda c: -fused[c])
         placeholders = ",".join("?" * len(ids))
         rows = {r["card_id"]: dict(r) for r in self.store.conn.execute(
-            f"SELECT * FROM cards WHERE card_id IN ({placeholders})", ids)}
+            f"SELECT c.*, s.title AS source_title, s.origin AS source_origin, "
+            f"s.url AS source_url FROM cards c "
+            f"LEFT JOIN sources s ON s.source_id = c.source_id "
+            f"WHERE c.card_id IN ({placeholders})", ids)}
 
         hits: list[Hit] = []
         for cid in ids:
@@ -299,11 +343,20 @@ class SearchEngine:
                 continue
             if min_read_ratio is not None and (r["read_ratio"] or 0) < min_read_ratio:
                 continue
+            if source and source.lower() not in (
+                    (r.get("source_id") or "") + " "
+                    + (r.get("source_title") or "") + " "
+                    + (r.get("source_origin") or "") + " "
+                    + (r.get("source_path") or "")).lower():
+                continue
             hits.append(Hit(
                 card_id=cid, score=fused[cid], tag=r["tag"],
                 read_text=r["read_text"] or "", cite_raw=r["cite_raw"] or "",
                 block=r["block"], side=r["side"] or "unknown",
                 source_id=r["source_id"] or "",
+                source_title=r.get("source_title") or "",
+                source_origin=r.get("source_origin") or "",
+                source_url=r.get("source_url"),
                 lexical_rank=lex_rank.get(cid), vector_rank=vec_rank.get(cid),
             ))
             if len(hits) >= k:

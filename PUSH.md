@@ -1,44 +1,45 @@
-# Getting cardgraph onto GitHub
+The current checkout contains the source and the uncommitted release changes.
+This session does not publish or push it automatically. Review the diff, run the
+checks below, then make the repository public or private according to the
+licenses of the evidence sources you plan to index.
 
-The repo is committed with full history. I could not create the GitHub repo from
-this session — its token is bound to pre-configured repositories and the API
-refuses `POST /user/repos` (403). So the last step is yours; it is one command.
-
-## Option A — from the zip (has the `.git` directory already)
+## Create the repository
 
 ```bash
-unzip cardgraph.zip && cd cardgraph
-gh repo create cardgraph --private --source=. --push
+gh repo create cardgraph --private --source=. --remote=origin --push
 ```
 
-No `gh`? Create an empty repo named `cardgraph` on github.com, then:
+Or create an empty repository on GitHub and push explicitly:
 
 ```bash
-git remote add origin git@github.com:crisliangct-source/cardgraph.git
+git remote add origin git@github.com:YOUR-ACCOUNT/cardgraph.git
 git push -u origin main
 ```
 
-## Option B — from the bundle
+Do not commit downloaded evidence, databases, vector caches, API keys, or
+personal credentials. The `.gitignore` excludes the normal local data outputs;
+review `git status` before staging.
+
+## Before publishing publicly
+
+- Verify every source's license and terms. The code's MIT license does not grant
+  rights to redistribute documents indexed by it.
+- Keep `opencaselist.com` and other login-gated sources gated; do not add a
+  scraper workaround.
+- Confirm that the allowlist contains only sources you have permission to fetch.
+- Review the generated README examples and remove any claim that is not backed by
+  a reproducible test or current source documentation.
+- Add repository metadata such as a description, topics, and a security policy
+  if the project will accept public issue reports.
+
+## Verification
 
 ```bash
-git clone cardgraph.bundle cardgraph && cd cardgraph
-git remote remove origin
-gh repo create cardgraph --private --source=. --push
+python -m compileall -q cardgraph
+ruff check --select E9,F63,F7,F82,F401,F811,F841 cardgraph tests
+python -m pytest tests/ -q
 ```
 
-## Before you make it public
-
-- Nothing in the repo is secret: no keys, no tokens, no personal files. The
-  `.gitignore` excludes `data/`, so no database, no cached model responses, and
-  no ingested evidence is committed.
-- The only content is code, docs, the synthetic fixture (all invented authors)
-  and the moratorium outline (structure only, no card bodies).
-- CI runs on push: pytest across Python 3.10/3.11/3.12, ruff, and an end-to-end
-  smoke test that runs the documented quickstart from an empty checkout. No
-  secrets required — the suite passes with no API key and no network.
-
-## Verified before shipping
-
-The bundle was cloned into a clean directory and, from that clone alone:
-79 tests pass in 2.4s, and the quickstart (`generate_synthetic` → `ingest` →
-`analyze`) runs end to end.
+The full test suite requires the dependencies in `pyproject.toml`; in a minimal
+checkout, install them first with `python -m pip install -e ".[dev]"` or
+`python -m pip install -r requirements.txt`.

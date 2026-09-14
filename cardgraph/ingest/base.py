@@ -10,10 +10,13 @@ from __future__ import annotations
 import glob
 import hashlib
 import os
+import posixpath
 import subprocess
+import zipfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from urllib.parse import urljoin, urlsplit
 
 from ..models import Source
 from .fetch import Fetcher
@@ -142,8 +145,9 @@ class HttpIndexAdapter(SourceAdapter):
     name = "http-index"
 
     LINK_SELECTORS = [
-        'a[href$=".docx"]',
-        'a[href$=".zip"]',
+        # Filter suffixes in Python: CSS `$=` misses ordinary links carrying
+        # query strings such as `cases.docx?season=2026`.
+        "a[href]",
         ".file-list a",
         "table a",
     ]
@@ -155,8 +159,36 @@ class HttpIndexAdapter(SourceAdapter):
         self.license = license
         self.fetcher = Fetcher(self.policy, stealth=stealth)
 
+    @staticmethod
+    def _is_supported_url(url: str) -> bool:
+        return os.path.splitext(urlsplit(url).path)[1].lower() in {
+            ".docx", ".docm", ".zip", ".htm", ".html",
+        }
+
+    def _allowed_link(self, url: str) -> bool:
+        """Keep discovery policy-gated, not only download policy-gated."""
+        try:
+            self.policy.check(url)
+        except Exception:
+            return False
+        return True
+
     def discover(self) -> list[str]:
+        # Check the index itself even when it is a direct file URL. Otherwise a
+        # gated or unknown host would fail later inside a per-file skip handler
+        # and look like an ordinary empty source instead of a policy refusal.
+        self.policy.check(self.index_url)
+
+        # Accept a direct public file URL as well as an HTML directory page.
+        # This makes `ingest online https://.../cases.zip` useful for small
+        # releases whose host does not provide a separate index page.
+        direct_ext = os.path.splitext(urlsplit(self.index_url).path)[1].lower()
+        if direct_ext in {".docx", ".docm", ".zip", ".htm", ".html"}:
+            return [self.index_url]
+
         res = self.fetcher.get(self.index_url)
+        if not res.ok:
+            raise RuntimeError(f"source index returned HTTP {res.status}: {self.index_url}")
         urls: list[str] = []
         sel = res.selector
         if sel is not None and hasattr(sel, "css"):
@@ -165,14 +197,19 @@ class HttpIndexAdapter(SourceAdapter):
                     for el in sel.css(css):
                         href = el.attrib.get("href")
                         if href:
-                            urls.append(self._absolutize(href))
+                            url = self._absolutize(href)
+                            if self._is_supported_url(url) and self._allowed_link(url):
+                                urls.append(url)
                 except Exception:
                     continue
         if not urls:
             import re
-            for m in re.finditer(r'href=["\']([^"\']+\.(?:docx|zip))["\']',
-                                 res.text, re.IGNORECASE):
-                urls.append(self._absolutize(m.group(1)))
+            for m in re.finditer(
+                    r'href=["\']([^"\']+[.](?:docx|docm|zip|htm|html)(?:[?#][^"\']*)?)["\']',
+                    res.text, re.IGNORECASE):
+                url = self._absolutize(m.group(1))
+                if self._is_supported_url(url) and self._allowed_link(url):
+                    urls.append(url)
         seen, out = set(), []
         for u in urls:
             if u not in seen:
@@ -181,37 +218,111 @@ class HttpIndexAdapter(SourceAdapter):
         return out
 
     def _absolutize(self, href: str) -> str:
-        from urllib.parse import urljoin
         return urljoin(self.index_url, href)
+
+    @staticmethod
+    def _extension(url: str) -> str:
+        return os.path.splitext(urlsplit(url).path)[1].lower()
+
+    @staticmethod
+    def _safe_member(name: str) -> str | None:
+        """Return a safe archive member path, or None for a traversal entry."""
+        normalized = posixpath.normpath(name.replace("\\", "/"))
+        if normalized in {"", "."} or normalized.startswith("/") \
+                or normalized == ".." or normalized.startswith("../"):
+            return None
+        return normalized
+
+    def _source(self, path: str, url: str, title: str,
+                source_id: str | None = None) -> Acquired:
+        return Acquired(
+            path=path,
+            source=Source(
+                source_id=source_id or _sid(self.name, url),
+                path=path,
+                title=title,
+                origin=self.name,
+                license=self.license,
+                fetched_at=_now(),
+                url=url,
+            ),
+        )
+
+    def _acquire_zip(self, url: str, limit: int | None = None) -> list[Acquired]:
+        """Download and safely unpack only debate-document members.
+
+        ZIPs are common for camp releases. Never extract arbitrary members:
+        besides wasting space, a crafted archive could write outside workdir.
+        """
+        archive_dir = os.path.join(self.workdir, self.name,
+                                   hashlib.sha1(url.encode()).hexdigest()[:12])
+        archive_path = os.path.join(archive_dir, "source.zip")
+        self.fetcher.download(url, archive_path)
+        out: list[Acquired] = []
+        with zipfile.ZipFile(archive_path) as archive:
+            for member in archive.infolist():
+                safe = self._safe_member(member.filename)
+                if safe is None or member.is_dir():
+                    continue
+                ext = os.path.splitext(safe)[1].lower()
+                if ext not in {".docx", ".docm", ".htm", ".html"}:
+                    continue
+                if limit is not None and len(out) >= limit:
+                    break
+                destination = os.path.join(archive_dir, "files", *safe.split("/"))
+                os.makedirs(os.path.dirname(destination), exist_ok=True)
+                with archive.open(member) as src, open(destination, "wb") as dst:
+                    dst.write(src.read())
+                member_url = f"{url}#{safe}"
+                out.append(self._source(
+                    destination, member_url,
+                    os.path.splitext(os.path.basename(safe))[0],
+                    source_id=_sid(self.name, member_url),
+                ))
+        return out
+
+    def _download_path(self, url: str, extension: str) -> str:
+        """Choose a deterministic, collision-free local path for a URL."""
+        basename = os.path.basename(urlsplit(url).path) or f"download{extension}"
+        digest = hashlib.sha1(url.encode()).hexdigest()[:12]
+        return os.path.join(self.workdir, self.name, f"{digest}-{basename}")
 
     def acquire(self, limit: int | None = None) -> list[Acquired]:
         links = self.discover()
-        if limit:
-            links = links[:limit]
         out: list[Acquired] = []
         for url in links:
-            if not url.lower().endswith(".docx"):
-                continue  # zip expansion left to the caller for now
-            fname = os.path.basename(url.split("?")[0])
-            dest = os.path.join(self.workdir, self.name, fname)
+            if limit is not None and len(out) >= limit:
+                break
+            ext = self._extension(url)
+            if ext == ".zip":
+                try:
+                    out.extend(self._acquire_zip(
+                        url, None if limit is None else limit - len(out)))
+                except Exception as exc:  # noqa: BLE001
+                    print(f"  ! skip {url}: {exc}")
+                continue
+            if ext not in {".docx", ".docm", ".htm", ".html"}:
+                continue
+            fname = os.path.basename(urlsplit(url).path) or f"download{ext}"
+            dest = self._download_path(url, ext)
             try:
                 self.fetcher.download(url, dest)
             except Exception as exc:  # noqa: BLE001
                 print(f"  ! skip {url}: {exc}")
                 continue
-            out.append(Acquired(
-                path=dest,
-                source=Source(
-                    source_id=_sid(self.name, url),
-                    path=dest,
-                    title=os.path.splitext(fname)[0],
-                    origin=self.name,
-                    license=self.license,
-                    fetched_at=_now(),
-                    url=url,
-                ),
-            ))
+            out.append(self._source(dest, url, os.path.splitext(fname)[0]))
         return out
+
+
+class OnlineEvidenceAdapter(HttpIndexAdapter):
+    """Public online speech-and-debate evidence release.
+
+    This is deliberately source-agnostic: point it at a public HTML index or
+    direct .docx/.zip/.htm URL after checking the source's terms. The access
+    policy still decides which hosts may be fetched.
+    """
+
+    name = "online"
 
 
 class OpenEvidenceAdapter(HttpIndexAdapter):

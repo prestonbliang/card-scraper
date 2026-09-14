@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from cardgraph.graph.relate import build_all, normalize_title, similarity
 from cardgraph.index.search import SearchEngine, _fts_escape
 from cardgraph.index.store import Store
-from cardgraph.models import Card, Cite, answers_target, infer_side
+from cardgraph.models import Card, Cite, Source, answers_target, infer_side
 from cardgraph.parse.cite import looks_like_cite, parse_cite
 from cardgraph.parse.docx_card import ELISION, parse_docx
 from seed.generate_synthetic import build as build_synthetic
@@ -185,6 +185,15 @@ def engine(parsed, corpus):
     db = os.path.join(tempfile.mkdtemp(), "t.db")
     store = Store(db)
     store.add_cards(cards)
+    store.add_source(Source(
+        source_id=cards[0].source_id,
+        path="/corpus/Greenhill/synthetic.docx",
+        title="Greenhill 2026 synthetic",
+        origin="local",
+        license="test fixture",
+        url="https://example.invalid/greenhill",
+        card_count=len(cards),
+    ))
     store.add_outline(root)
     build_all(store)
     e = SearchEngine(store)
@@ -204,6 +213,12 @@ def test_semantic_query_without_shared_vocabulary(engine):
     hits = e.search("households end up paying for wires they do not use", k=3)
     assert hits
     assert "households" in hits[0].tag.lower() or "household" in hits[0].read_text.lower()
+
+
+def test_source_filter_limits_lexical_and_vector_results(engine):
+    e, _ = engine
+    assert e.search("Okonkwo", k=5, source="Greenhill")
+    assert not e.search("Okonkwo", k=5, source="another-school")
 
 
 def test_answer_edges_built(engine):

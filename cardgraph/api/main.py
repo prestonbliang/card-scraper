@@ -22,6 +22,8 @@ from ..index.store import Store
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))), "web")
+if not os.path.exists(os.path.join(WEB_DIR, "index.html")):
+    WEB_DIR = os.path.join(os.sys.prefix, "share", "cardgraph")
 
 
 def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
@@ -42,6 +44,23 @@ def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
     def stats() -> dict:
         return store.stats()
 
+    @app.get("/api/sources")
+    def sources(limit: int = Query(100, ge=1, le=500),
+                origin: str | None = None) -> dict:
+        """List searchable online/local evidence sources and their provenance."""
+        where = []
+        params: list[object] = []
+        if origin:
+            where.append("origin = ?")
+            params.append(origin)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        rows = store.conn.execute(
+            "SELECT source_id, title, origin, license, fetched_at, url, card_count "
+            f"FROM sources{clause} ORDER BY fetched_at DESC, title LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+        return {"sources": [dict(r) for r in rows]}
+
     @app.get("/api/search")
     def search(
         q: str = Query(..., min_length=1),
@@ -52,10 +71,11 @@ def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
         year_max: int | None = None,
         block: str | None = None,
         min_read_ratio: float | None = None,
+        source: str | None = None,
     ) -> dict:
         hits = engine.search(q, k=k, side=side, author=author, year_min=year_min,
                              year_max=year_max, block=block,
-                             min_read_ratio=min_read_ratio)
+                             min_read_ratio=min_read_ratio, source=source)
         return {"query": q, "count": len(hits), "hits": [h.to_dict() for h in hits]}
 
     @app.get("/api/card/{card_id}")
@@ -63,6 +83,13 @@ def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
         row = store.card(card_id)
         if not row:
             raise HTTPException(404, "no such card")
+        source = store.conn.execute(
+            "SELECT title AS source_title, origin AS source_origin, "
+            "license AS source_license, url AS source_url "
+            "FROM sources WHERE source_id=?", (row.get("source_id"),)
+        ).fetchone()
+        if source:
+            row.update(dict(source))
         row["path"] = json.loads(row.pop("path_json") or "[]")
         row["warrant_flags"] = json.loads(row.get("warrant_flags") or "[]")
         row["similar"] = [h.to_dict() for h in engine.similar(card_id, k=6)]
