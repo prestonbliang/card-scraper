@@ -97,6 +97,28 @@ RULES: dict[str, SourceRule] = {
         contact="Cite arXiv:2406.14657 when you use it.",
         min_interval_s=1.0,
     ),
+    "debate-central.ncpathinktank.org": SourceRule(
+        host="debate-central.ncpathinktank.org",
+        tier=Tier.ATTRIBUTED,
+        license="per-file; publisher terms apply",
+        note="Debate Central publicly posts free debate evidence and topic "
+             "files. Verify the terms of each linked document before sharing "
+             "or redistributing it.",
+        contact="Credit Debate Central / NCPA and the original authors where "
+                "the file identifies them.",
+        min_interval_s=2.0,
+    ),
+    "debateus.org": SourceRule(
+        host="debateus.org",
+        tier=Tier.ATTRIBUTED,
+        license="per-file; publisher terms apply",
+        note="Public Policy, LD, and PF topic resources with linked files. "
+             "Some resources may be third-party or account-backed; only "
+             "follow links that are publicly accessible.",
+        contact="Credit DebateUS and each original source; verify current "
+                "terms before redistribution.",
+        min_interval_s=2.0,
+    ),
     "opencaselist.com": SourceRule(
         host="opencaselist.com",
         tier=Tier.GATED,
@@ -118,6 +140,69 @@ RULES: dict[str, SourceRule] = {
 
 class AccessRefused(RuntimeError):
     """Raised when a URL is outside the allowlist or in a gated tier."""
+
+
+SOURCE_CATALOG: tuple[dict[str, str], ...] = (
+    {
+        "id": "openev",
+        "name": "Open Evidence Project",
+        "url": "https://openev.debatecoaches.org/",
+        "kind": "public index",
+        "access": "open",
+        "command": "cardgraph ingest openev <current-public-index>",
+        "note": "Camp files published for community use; verify current terms.",
+    },
+    {
+        "id": "debate-central",
+        "name": "Debate Central",
+        "url": "https://debate-central.ncpathinktank.org/evidence/",
+        "kind": "public index and PDF files",
+        "access": "attributed",
+        "command": "cardgraph ingest online https://debate-central.ncpathinktank.org/evidence/",
+        "note": "Free evidence/topic files; credit Debate Central/NCPA and original authors.",
+    },
+    {
+        "id": "debateus",
+        "name": "DebateUS",
+        "url": "https://debateus.org/policy/",
+        "kind": "public index; mixed linked resources",
+        "access": "attributed",
+        "command": "cardgraph ingest online https://debateus.org/policy/",
+        "note": "Public resources include third-party material; verify each file's terms.",
+    },
+    {
+        "id": "opendebateevidence",
+        "name": "OpenDebateEvidence",
+        "url": "https://huggingface.co/datasets/Yusuf5/OpenCaselist",
+        "kind": "research dataset",
+        "access": "attributed",
+        "command": "cardgraph ingest-opendebate --limit 5000",
+        "note": "Use the research release and cite the associated dataset paper.",
+    },
+    {
+        "id": "caselist-archive",
+        "name": "Caselist Archive",
+        "url": "https://github.com/ashtarcommunications/caselist-archive",
+        "kind": "Git repository",
+        "access": "attributed",
+        "command": "cardgraph ingest caselist-archive",
+        "note": "Historical caselist pages; original repository terms apply.",
+    },
+    {
+        "id": "opencaselist",
+        "name": "openCaselist",
+        "url": "https://opencaselist.com/",
+        "kind": "login-gated repository",
+        "access": "gated",
+        "command": "use your own authorized session; do not scrape around login",
+        "note": "Not fetched by Card Scraper; login and disclosure reciprocity are intentional.",
+    },
+)
+
+
+def source_catalog() -> list[dict[str, str]]:
+    """Return reviewed source profiles without implying every file is reusable."""
+    return [dict(profile) for profile in SOURCE_CATALOG]
 
 
 @dataclass

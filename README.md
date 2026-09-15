@@ -1,8 +1,8 @@
-# cardgraph
+# Card Scraper
 
 Search, browse and **stress-test** debate evidence.
 
-It parses Verbatim-style `.docx` into structured cards, indexes them on the text
+Card Scraper (the Python package remains `cardgraph` for compatibility) parses Verbatim-style `.docx` into structured cards, indexes them on the text
 that actually gets read aloud, links `AT:` blocks to what they answer across
 every file you own, and then reads your positions the way a prepared opponent
 would: reconstructing each internal link chain, marking the steps no card
@@ -98,14 +98,16 @@ anyway — see below.
 | --- | --- | --- |
 | **OpenDebateEvidence** | ~3.5M cards from OpenCaseList, published as a research dataset *with the project's blessing*, PII-anonymized ([arXiv:2406.14657](https://arxiv.org/abs/2406.14657)) | `ingest-opendebate` |
 | Open Evidence Project | camp files released for free community use | `ingest openev [url]` or `ingest online <public index-or-file-url>` |
-| public case release | an allowlisted HTML index or direct `.docx`, `.docm`, `.htm`, `.html`, or `.zip` URL | `ingest online <url>` |
+| public case release | an allowlisted HTML index or direct `.docx`, `.docm`, `.htm`, `.html`, or `.pdf` URL | `ingest online <url>` |
 | `caselist-archive` | ~40,000 archived caselist wiki pages, 2013 onward | `ingest caselist-archive` |
 | your own files | no network, no questions | `ingest local <dir>` |
 
 `ingest online` accepts a public HTML index or a direct supported file URL. ZIP
-releases are unpacked safely, only supported debate documents are retained, and
-source URL/license metadata is stored with every imported file. Links to unknown
-or login-gated hosts are refused by the allowlist before a request is made.
+releases are unpacked safely, and PDFs are imported conservatively one page at a
+time because PDF layout does not reliably preserve card boundaries or read
+marking. Only supported debate documents are retained, and source URL/license
+metadata is stored with every imported file. Links to unknown or login-gated
+hosts are refused by the allowlist before a request is made.
 Use `--license` to record the source's attribution note and `--stealth` only when
 the public source permits access but its CDN blocks ordinary clients; stealth is
 not an authorization bypass.
@@ -115,6 +117,7 @@ python -m cardgraph.cli ingest online https://openev.debatecoaches.org/releases/
     --limit 500 --license "Open Evidence Project terms; verify before redistribution"
 python -m cardgraph.cli search "households pay for transmission" \
     --source openev --side aff
+python -m cardgraph.cli catalog  # reviewed sources and their access boundaries
 ```
 
 The API exposes the same provenance through `GET /api/sources`; `/api/search`
@@ -133,7 +136,7 @@ independently thought a card was worth reading.
 > ingest. The row→Card mapping is tested against a schema-faithful fixture
 > (`tests/fixtures/opendebate_rows.jsonl`) so it is verified without network.
 
-`python -m cardgraph.cli policy` prints the allowlist and why each entry is there.
+`python -m cardgraph.cli policy` prints the fetch allowlist and why each entry is there. `python -m cardgraph.cli catalog` prints reviewed source profiles, including public/attributed/gated boundaries; a catalog entry is not a blanket redistribution license.
 
 ---
 
@@ -232,14 +235,15 @@ answer edges, 31,011 duplicate edges) · index fit 3m52s once, 6s warm · search
 ## Install
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -e ".[dev]"
 python -m pytest tests/ -q          # offline regression suite
 ```
 
-Optional: Scrapling (`scrapling curl_cffi patchright browserforge`) for the
-stealth fetch path — without it, fetching falls back to `urllib`, which handles
-the plain `.docx`/`.zip` downloads that make up most open corpora. `datasets` for
-the OpenDebateEvidence adapter. `anthropic` for the SDK provider.
+Optional fetch extras include Scrapling (`scrapling curl_cffi patchright browserforge`) for the
+stealth fetch path — without them, fetching falls back to `urllib`, which handles
+the plain `.docx`/`.zip`/`.pdf` downloads that make up most open corpora. `pypdf`
+is installed for conservative page-level PDF extraction. `datasets` supports the
+OpenDebateEvidence adapter. `anthropic` enables the SDK provider.
 
 Embeddings default to TF-IDF + SVD (scikit-learn): installs in seconds, runs on
 CPU, and on a single-topic corpus — which every debate corpus is — the gap

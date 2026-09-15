@@ -67,7 +67,7 @@ class LocalDirAdapter(SourceAdapter):
     # wiki pages. Globbing only *.docx was a real bug -- the caselist-archive
     # adapter reported success and ingested zero cards, because that archive is
     # 40,000 .htm files.
-    PATTERNS = ("*.docx", "*.docm", "*.htm", "*.html")
+    PATTERNS = ("*.docx", "*.docm", "*.htm", "*.html", "*.pdf")
 
     def acquire(self, limit: int | None = None) -> list[Acquired]:
         found: list[str] = []
@@ -75,14 +75,19 @@ class LocalDirAdapter(SourceAdapter):
             found += glob.glob(os.path.join(self.root, "**", pat), recursive=True)
         found = sorted(p for p in set(found)
                        if not os.path.basename(p).startswith("~$"))
-        if limit:
+        if limit is not None:
             found = found[:limit]
         out = []
         for p in found:
+            absolute = os.path.abspath(p)
+            stat = os.stat(p)
+            # Include file metadata so resume mode notices a document edited in
+            # place instead of silently keeping the old cards for that path.
+            version = f"{stat.st_size}:{stat.st_mtime_ns}"
             out.append(Acquired(
                 path=p,
                 source=Source(
-                    source_id=_sid(self.name, os.path.abspath(p)),
+                    source_id=_sid(self.name, absolute, version),
                     path=p,
                     title=os.path.splitext(os.path.basename(p))[0],
                     origin=self.name,
@@ -134,7 +139,7 @@ class GitRepoAdapter(SourceAdapter):
 
 
 class HttpIndexAdapter(SourceAdapter):
-    """Walk an HTML index page and download the .docx / .zip files it links.
+    """Walk an HTML index page and download the .docx / .pdf / .zip files it links.
 
     This is the shape of the Open Evidence Project and most camp file releases:
     a directory page of download links. Selectors are declared as a list so a
@@ -162,7 +167,7 @@ class HttpIndexAdapter(SourceAdapter):
     @staticmethod
     def _is_supported_url(url: str) -> bool:
         return os.path.splitext(urlsplit(url).path)[1].lower() in {
-            ".docx", ".docm", ".zip", ".htm", ".html",
+            ".docx", ".docm", ".zip", ".htm", ".html", ".pdf",
         }
 
     def _allowed_link(self, url: str) -> bool:
@@ -183,7 +188,7 @@ class HttpIndexAdapter(SourceAdapter):
         # This makes `ingest online https://.../cases.zip` useful for small
         # releases whose host does not provide a separate index page.
         direct_ext = os.path.splitext(urlsplit(self.index_url).path)[1].lower()
-        if direct_ext in {".docx", ".docm", ".zip", ".htm", ".html"}:
+        if direct_ext in {".docx", ".docm", ".zip", ".htm", ".html", ".pdf"}:
             return [self.index_url]
 
         res = self.fetcher.get(self.index_url)
@@ -205,7 +210,7 @@ class HttpIndexAdapter(SourceAdapter):
         if not urls:
             import re
             for m in re.finditer(
-                    r'href=["\']([^"\']+[.](?:docx|docm|zip|htm|html)(?:[?#][^"\']*)?)["\']',
+                    r'href=["\']([^"\']+[.](?:docx|docm|zip|pdf|htm|html)(?:[?#][^"\']*)?)["\']',
                     res.text, re.IGNORECASE):
                 url = self._absolutize(m.group(1))
                 if self._is_supported_url(url) and self._allowed_link(url):
@@ -229,7 +234,9 @@ class HttpIndexAdapter(SourceAdapter):
         """Return a safe archive member path, or None for a traversal entry."""
         normalized = posixpath.normpath(name.replace("\\", "/"))
         if normalized in {"", "."} or normalized.startswith("/") \
-                or normalized == ".." or normalized.startswith("../"):
+                or normalized == ".." or normalized.startswith("../") \
+                or normalized.split("/", 1)[0].endswith(":") \
+                or "\x00" in normalized:
             return None
         return normalized
 
@@ -248,6 +255,9 @@ class HttpIndexAdapter(SourceAdapter):
             ),
         )
 
+    MAX_MEMBER_BYTES = 50 * 1024 * 1024
+    MAX_ARCHIVE_BYTES = 500 * 1024 * 1024
+
     def _acquire_zip(self, url: str, limit: int | None = None) -> list[Acquired]:
         """Download and safely unpack only debate-document members.
 
@@ -258,21 +268,40 @@ class HttpIndexAdapter(SourceAdapter):
                                    hashlib.sha1(url.encode()).hexdigest()[:12])
         archive_path = os.path.join(archive_dir, "source.zip")
         self.fetcher.download(url, archive_path)
+        if os.path.getsize(archive_path) > self.MAX_ARCHIVE_BYTES:
+            raise ValueError(
+                f"archive exceeds {self.MAX_ARCHIVE_BYTES // (1024 * 1024)} MiB limit")
         out: list[Acquired] = []
+        seen_members: set[str] = set()
+        total_bytes = 0
         with zipfile.ZipFile(archive_path) as archive:
             for member in archive.infolist():
                 safe = self._safe_member(member.filename)
-                if safe is None or member.is_dir():
+                if safe is None or member.is_dir() or safe in seen_members:
                     continue
+                seen_members.add(safe)
                 ext = os.path.splitext(safe)[1].lower()
-                if ext not in {".docx", ".docm", ".htm", ".html"}:
+                if ext not in {".docx", ".docm", ".htm", ".html", ".pdf"}:
                     continue
+                if member.file_size > self.MAX_MEMBER_BYTES:
+                    continue
+                if total_bytes + member.file_size > self.MAX_ARCHIVE_BYTES:
+                    break
                 if limit is not None and len(out) >= limit:
                     break
                 destination = os.path.join(archive_dir, "files", *safe.split("/"))
                 os.makedirs(os.path.dirname(destination), exist_ok=True)
                 with archive.open(member) as src, open(destination, "wb") as dst:
-                    dst.write(src.read())
+                    written = 0
+                    while True:
+                        chunk = src.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        if written > self.MAX_MEMBER_BYTES:
+                            raise ValueError("archive member exceeds size limit")
+                        dst.write(chunk)
+                total_bytes += written
                 member_url = f"{url}#{safe}"
                 out.append(self._source(
                     destination, member_url,
@@ -301,7 +330,7 @@ class HttpIndexAdapter(SourceAdapter):
                 except Exception as exc:  # noqa: BLE001
                     print(f"  ! skip {url}: {exc}")
                 continue
-            if ext not in {".docx", ".docm", ".htm", ".html"}:
+            if ext not in {".docx", ".docm", ".htm", ".html", ".pdf"}:
                 continue
             fname = os.path.basename(urlsplit(url).path) or f"download{ext}"
             dest = self._download_path(url, ext)

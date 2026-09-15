@@ -46,6 +46,8 @@ class Hit:
     block: str | None
     side: str
     source_id: str
+    cite_author: str | None = None
+    cite_year: int | None = None
     source_title: str = ""
     source_origin: str = ""
     source_url: str | None = None
@@ -56,7 +58,8 @@ class Hit:
         return {
             "card_id": self.card_id, "score": round(self.score, 5),
             "tag": self.tag, "read_text": self.read_text,
-            "cite_raw": self.cite_raw, "block": self.block, "side": self.side,
+            "cite_raw": self.cite_raw, "cite_author": self.cite_author,
+            "cite_year": self.cite_year, "block": self.block, "side": self.side,
             "source_id": self.source_id,
             "lexical_rank": self.lexical_rank, "vector_rank": self.vector_rank,
             "source_title": self.source_title, "source_origin": self.source_origin,
@@ -142,7 +145,10 @@ class VectorIndex:
                 # Every token is a stop word (or the corpus is near-empty).
                 self._vec, X = _fit(min_df=1, max_df=1.0, stop_words=None)
 
-        n_comp = min(self.dims, max(2, min(X.shape) - 1))
+        # SVD requires n_components < min(samples, features). The previous
+        # lower bound of two crashed on a tiny corpus whose cards shared only
+        # one vocabulary term; dense TF-IDF is the correct fallback there.
+        n_comp = min(self.dims, max(1, min(X.shape) - 1))
         if X.shape[0] > 2 and n_comp >= 2:
             self._svd = TruncatedSVD(n_components=n_comp, random_state=0)
             dense = self._svd.fit_transform(X)
@@ -172,7 +178,8 @@ class VectorIndex:
             h.update(cid.encode())
         return h.hexdigest()[:16]
 
-    def save(self, path: str, fingerprint: str) -> None:
+    def save(self, path: str, fingerprint: str,
+             revision: tuple[int, int] | None = None) -> None:
         if self.matrix is None or self._vec is None:
             return
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -180,13 +187,15 @@ class VectorIndex:
         with open(tmp, "wb") as fh:
             pickle.dump({
                 "format": self.FORMAT, "fingerprint": fingerprint,
+                "revision": revision,
                 "dims": self.dims, "card_ids": self.card_ids,
                 "vec": self._vec, "svd": self._svd, "matrix": self.matrix,
             }, fh, protocol=pickle.HIGHEST_PROTOCOL)
         # atomic: a half-written cache must never be loadable
         os.replace(tmp, path)
 
-    def load(self, path: str, fingerprint: str) -> bool:
+    def load(self, path: str, fingerprint: str,
+             revision: tuple[int, int] | None = None) -> bool:
         if not path or not os.path.exists(path):
             return False
         try:
@@ -194,10 +203,18 @@ class VectorIndex:
                 blob = pickle.load(fh)
         except Exception:
             return False
+        if not isinstance(blob, dict):
+            return False
         if blob.get("format") != self.FORMAT:
             return False
         if blob.get("fingerprint") != fingerprint:
             return False    # corpus changed; refit rather than serve a stale index
+        # `revision=None` preserves the small public load() API for callers
+        # inspecting legacy caches. SearchEngine supplies it so a same-id
+        # replacement (for example an edited card with identical content hash)
+        # cannot reuse a stale fitted matrix.
+        if revision is not None and blob.get("revision") != revision:
+            return False
         self.dims = blob["dims"]
         self.card_ids = blob["card_ids"]
         self._vec = blob["vec"]
@@ -207,7 +224,7 @@ class VectorIndex:
 
     def query(self, text: str, k: int = 50,
               allowed: set[str] | None = None) -> list[tuple[str, float]]:
-        if self.matrix is None or self._vec is None or not self.card_ids:
+        if k <= 0 or self.matrix is None or self._vec is None or not self.card_ids:
             return []
         from sklearn.preprocessing import normalize
 
@@ -226,11 +243,17 @@ class VectorIndex:
                 if np.isfinite(sims[i])]
 
 
+def _like_pattern(value: str) -> str:
+    """Build a literal substring pattern for SQLite LIKE."""
+    return "%" + value.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
 class SearchEngine:
     def __init__(self, store: Store, cache_path: str | None = None):
         self.store = store
         self.vectors = VectorIndex()
         self._built = False
+        self._revision: tuple[int, int] | None = None
         if cache_path is None and getattr(store, "path", None):
             cache_path = os.path.splitext(store.path)[0] + ".index"
         self.cache_path = cache_path
@@ -239,72 +262,129 @@ class SearchEngine:
         say = progress or (lambda *_: None)
         # Fingerprint from ids alone, so a cache hit never pays to load the
         # whole corpus into memory.
+        revision = self.store.card_revision()
         fp = VectorIndex.fingerprint(self.store.card_ids())
-        if use_cache and self.cache_path and self.vectors.load(self.cache_path, fp):
+        if use_cache and self.cache_path and self.vectors.load(
+                self.cache_path, fp, revision=revision):
             say(f"loaded cached index ({len(self.vectors.card_ids)} cards)")
             self._built = True
+            self._fingerprint = fp
+            self._revision = self.store.card_revision()
             return
         rows = self.store.all_cards()
         say(f"fitting index over {len(rows)} cards (cached after this)")
         self.vectors.build(rows)
         if use_cache and self.cache_path:
             try:
-                self.vectors.save(self.cache_path, fp)
+                self.vectors.save(self.cache_path, fp, revision=revision)
             except Exception:
                 pass    # a cache we cannot write is not a reason to fail a search
         self._built = True
+        self._fingerprint = fp
+        self._revision = self.store.card_revision()
+
+    def _ensure_current(self) -> None:
+        """Refresh after another command adds cards to this live store."""
+        current = self.store.card_revision()
+        if not self._built or current != self._revision:
+            self.build()
 
     def _lexical(self, query: str, k: int,
-                 source: str | None = None) -> list[tuple[str, float]]:
-        source_clause = ""
+                 allowed: set[str] | None = None) -> list[tuple[str, float]]:
         params: list[object] = [_fts_escape(query)]
-        if source:
-            source_clause = (
-                " AND lower(COALESCE(c.source_id, '') || ' ' || "
-                "COALESCE(src.title, '') || ' ' || COALESCE(src.origin, '') || ' ' || "
-                "COALESCE(c.source_path, '')) LIKE ?"
-            )
-            params.append(f"%{source.lower()}%")
+        allowed_clause = ""
+        if allowed is not None:
+            if not allowed:
+                return []
+            # SQLite builds commonly cap bound parameters at 999. A broad
+            # source filter can contain thousands of cards, so rank each safe
+            # chunk and merge the top results instead of failing with a runtime
+            # "too many SQL variables" error.
+            if len(allowed) > 900:
+                ranked: list[tuple[str, float]] = []
+                ids = sorted(allowed)
+                for start in range(0, len(ids), 800):
+                    ranked.extend(self._lexical(query, k, set(ids[start:start + 800])))
+                return sorted(ranked, key=lambda item: -item[1])[:k]
+            placeholders = ",".join("?" * len(allowed))
+            allowed_clause = f" AND m.card_id IN ({placeholders})"
+            params.extend(sorted(allowed))
         params.append(k)
         try:
             rows = self.store.conn.execute(
                 """SELECT m.card_id AS card_id, bm25(cards_fts, 8.0, 4.0, 2.0, 1.0) AS score
                    FROM cards_fts
                    JOIN fts_map m ON m.rowid = cards_fts.rowid
-                   JOIN cards c ON c.card_id = m.card_id
-                   LEFT JOIN sources src ON src.source_id = c.source_id
-                   WHERE cards_fts MATCH ?""" + source_clause + " ORDER BY score LIMIT ?",
-                params,
+                   WHERE cards_fts MATCH ?""" + allowed_clause +
+                " ORDER BY score LIMIT ?", params,
             ).fetchall()
         except Exception:
             return []
         return [(r["card_id"], -float(r["score"])) for r in rows]
+
+    def _candidate_ids(self, *, side: str | None = None,
+                       author: str | None = None, year_min: int | None = None,
+                       year_max: int | None = None, block: str | None = None,
+                       min_read_ratio: float | None = None,
+                       source: str | None = None) -> set[str] | None:
+        """Return metadata-matching ids before ranking.
+
+        Applying filters after a top-60 pool is incorrect: a narrow author or
+        season filter can remove every early hit while matching cards remain
+        below the pool. Candidate restriction is shared by BM25 and vectors so
+        both rankers see the same universe and the requested k is meaningful.
+        """
+        where: list[str] = []
+        params: list[object] = []
+        if side and side != "both":
+            where.append("c.side = ?")
+            params.append(side)
+        if author:
+            where.append("lower(COALESCE(c.cite_author, '')) = ?")
+            params.append(author.lower())
+        if year_min is not None:
+            where.append("COALESCE(c.cite_year, 0) >= ?")
+            params.append(year_min)
+        if year_max is not None:
+            where.append("COALESCE(c.cite_year, 9999) <= ?")
+            params.append(year_max)
+        if block:
+            where.append("lower(COALESCE(c.block, '')) LIKE ? ESCAPE '\\'")
+            params.append(_like_pattern(block))
+        if min_read_ratio is not None:
+            where.append("COALESCE(c.read_ratio, 0) >= ?")
+            params.append(min_read_ratio)
+        if source:
+            where.append(
+                "lower(COALESCE(c.source_id, '') || ' ' || "
+                "COALESCE(s.title, '') || ' ' || COALESCE(s.origin, '') || ' ' || "
+                "COALESCE(c.source_path, '')) LIKE ? ESCAPE '\\'"
+            )
+            params.append(_like_pattern(source))
+        if not where:
+            return None
+        rows = self.store.conn.execute(
+            "SELECT c.card_id FROM cards c LEFT JOIN sources s ON s.source_id = c.source_id "
+            "WHERE " + " AND ".join(where), params).fetchall()
+        return {r["card_id"] for r in rows}
 
     def search(self, query: str, k: int = 25, *, side: str | None = None,
                author: str | None = None, year_min: int | None = None,
                year_max: int | None = None, block: str | None = None,
                min_read_ratio: float | None = None,
                source: str | None = None) -> list[Hit]:
-        if not self._built:
-            self.build()
+        if k <= 0 or not query.strip():
+            return []
+        self._ensure_current()
 
         pool = max(k * 4, 60)
-        allowed: set[str] | None = None
-        if source:
-            source_rows = self.store.conn.execute(
-                """SELECT c.card_id FROM cards c
-                   LEFT JOIN sources s ON s.source_id = c.source_id
-                   WHERE lower(COALESCE(c.source_id, '') || ' ' ||
-                              COALESCE(s.title, '') || ' ' ||
-                              COALESCE(s.origin, '') || ' ' ||
-                              COALESCE(c.source_path, '')) LIKE ?""",
-                (f"%{source.lower()}%",),
-            ).fetchall()
-            allowed = {r["card_id"] for r in source_rows}
-            if not allowed:
-                return []
+        allowed = self._candidate_ids(
+            side=side, author=author, year_min=year_min, year_max=year_max,
+            block=block, min_read_ratio=min_read_ratio, source=source)
+        if allowed == set():
+            return []
 
-        lex = self._lexical(query, pool, source=source)
+        lex = self._lexical(query, pool, allowed=allowed)
         vec = self.vectors.query(query, pool, allowed=allowed)
 
         lex_rank = {cid: i + 1 for i, (cid, _) in enumerate(lex)}
@@ -331,11 +411,11 @@ class SearchEngine:
             r = rows.get(cid)
             if not r:
                 continue
-            if side and r["side"] != side:
+            if side and side != "both" and r["side"] != side:
                 continue
             if author and (r["cite_author"] or "").lower() != author.lower():
                 continue
-            if year_min and (r["cite_year"] or 0) < year_min:
+            if year_min is not None and (r["cite_year"] or 0) < year_min:
                 continue
             if year_max and (r["cite_year"] or 9999) > year_max:
                 continue
@@ -352,6 +432,7 @@ class SearchEngine:
             hits.append(Hit(
                 card_id=cid, score=fused[cid], tag=r["tag"],
                 read_text=r["read_text"] or "", cite_raw=r["cite_raw"] or "",
+                cite_author=r.get("cite_author"), cite_year=r.get("cite_year"),
                 block=r["block"], side=r["side"] or "unknown",
                 source_id=r["source_id"] or "",
                 source_title=r.get("source_title") or "",
@@ -396,18 +477,23 @@ class SearchEngine:
         parameter, it is reported alongside each match, and `analysis/engine.py`
         surfaces the score so you can see how strong "you have this" really is.
         """
-        if not self._built:
-            self.build()
+        if k <= 0 or not query.strip():
+            return []
+        self._ensure_current()
         exclude = exclude_card_ids or set()
-        # When restricted, scan deeper: the owner's cards may sit well below the
-        # global top-k on a corpus this size, and stopping early would report
-        # "not in your files" for evidence that is.
-        depth = k + len(exclude) + (400 if restrict_to is not None else 10)
+        # When restricted, rank only the owner's candidates. Scanning the global
+        # top-N and filtering afterward can miss an owner's good card entirely
+        # on a shared archive, no matter how large N becomes.
+        allowed = None
+        if restrict_to is not None:
+            allowed = set(restrict_to) - exclude
+            if not allowed:
+                return []
+        depth = (min(k + len(exclude) + 10, len(allowed))
+                 if allowed is not None else k + len(exclude) + 10)
         out: list[tuple[str, float]] = []
-        for cid, score in self.vectors.query(query, k=depth):
+        for cid, score in self.vectors.query(query, k=depth, allowed=allowed):
             if cid in exclude:
-                continue
-            if restrict_to is not None and cid not in restrict_to:
                 continue
             if score < floor:
                 continue
@@ -419,6 +505,8 @@ class SearchEngine:
     def similar(self, card_id: str, k: int = 10) -> list[Hit]:
         """Cards making a similar argument. Doubles as duplicate detection --
         the same card recut by three teams should surface as three near-ties."""
+        if k <= 0:
+            return []
         row = self.store.card(card_id)
         if not row:
             return []

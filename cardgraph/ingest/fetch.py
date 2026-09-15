@@ -30,6 +30,13 @@ from typing import Any
 
 from .policy import AccessPolicy, AccessRefused  # noqa: F401  (re-exported)
 
+
+class FetchLimitExceeded(ValueError):
+    """Raised when a remote response is larger than the configured safety cap."""
+
+
+MAX_RESPONSE_BYTES = 500 * 1024 * 1024
+
 USER_AGENT = (
     "cardgraph/0.1 (debate evidence indexer; contact: set CARDGRAPH_CONTACT)"
 )
@@ -96,25 +103,52 @@ class Fetcher:
                 kwargs["headers"] = {"User-Agent": _contact_ua()}
             try:
                 resp = backend.get(url, **kwargs)
+                content = getattr(resp, "content", b"") or b""
+                text = getattr(resp, "body", "") or ""
+                size = len(content) or len(text.encode("utf-8", "ignore"))
+                if size > MAX_RESPONSE_BYTES:
+                    raise FetchLimitExceeded(
+                        f"response exceeds {MAX_RESPONSE_BYTES // (1024 * 1024)} MiB limit")
                 return FetchResult(
                     url=url,
                     status=getattr(resp, "status", 200),
-                    text=getattr(resp, "body", "") or "",
-                    content=getattr(resp, "content", b"") or b"",
+                    text=text,
+                    content=content,
                     selector=resp,
                 )
             except TypeError:
                 # signature drift between Scrapling versions -- retry bare
                 resp = backend.get(url)
+                content = getattr(resp, "content", b"") or b""
+                text = getattr(resp, "body", "") or ""
+                if len(content) or len(text.encode("utf-8", "ignore")) > MAX_RESPONSE_BYTES:
+                    raise FetchLimitExceeded(
+                        f"response exceeds {MAX_RESPONSE_BYTES // (1024 * 1024)} MiB limit")
                 return FetchResult(url=url, status=getattr(resp, "status", 200),
-                                   text=getattr(resp, "body", "") or "",
-                                   selector=resp)
+                                   text=text, content=content, selector=resp)
+            except FetchLimitExceeded:
+                raise
             except Exception:
                 pass  # fall through to urllib
 
         req = urllib.request.Request(url, headers={"User-Agent": _contact_ua()})
         with urllib.request.urlopen(req, timeout=self.timeout) as r:
-            raw = r.read()
+            length = r.headers.get("Content-Length")
+            if length and int(length) > MAX_RESPONSE_BYTES:
+                raise FetchLimitExceeded(
+                    f"response exceeds {MAX_RESPONSE_BYTES // (1024 * 1024)} MiB limit")
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = r.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_RESPONSE_BYTES:
+                    raise FetchLimitExceeded(
+                        f"response exceeds {MAX_RESPONSE_BYTES // (1024 * 1024)} MiB limit")
+                chunks.append(chunk)
+            raw = b"".join(chunks)
         text = ""
         try:
             text = raw.decode("utf-8", "replace")
@@ -125,7 +159,12 @@ class Fetcher:
     def download(self, url: str, dest: str) -> str:
         """Fetch a binary (.docx / .zip) to disk."""
         res = self.get(url)
+        if not res.ok:
+            raise RuntimeError(f"source returned HTTP {res.status}: {url}")
         payload = res.content or res.text.encode("utf-8", "ignore")
+        if len(payload) > MAX_RESPONSE_BYTES:
+            raise FetchLimitExceeded(
+                f"response exceeds {MAX_RESPONSE_BYTES // (1024 * 1024)} MiB limit")
         os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
         with open(dest, "wb") as fh:
             fh.write(payload)

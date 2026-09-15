@@ -132,6 +132,74 @@ class Store:
                  src.fetched_at, src.url, src.card_count),
             )
 
+    def remove_source(self, source_id: str) -> None:
+        """Remove one imported file and its derived search/graph rows.
+
+        Re-ingesting an edited document must replace its old cards rather than
+        leave stale evidence beside the new parse. Cards are source-owned in the
+        store, so deleting the source's cards also keeps FTS and outline rows in
+        sync. Callers use this only after a replacement parsed successfully.
+        """
+        with self.tx() as c:
+            node_ids = [r[0] for r in c.execute(
+                "SELECT node_id FROM nodes WHERE source_id=?", (source_id,))]
+            card_ids = [r[0] for r in c.execute(
+                "SELECT card_id FROM cards WHERE source_id=?", (source_id,))]
+            edge_ids = node_ids + card_ids
+            if edge_ids:
+                placeholders = ",".join("?" * len(edge_ids))
+                c.execute(
+                    f"DELETE FROM edges WHERE src_node_id IN ({placeholders}) "
+                    f"OR dst_node_id IN ({placeholders})",
+                    (*edge_ids, *edge_ids),
+                )
+            if node_ids:
+                placeholders = ",".join("?" * len(node_ids))
+                c.execute(
+                    f"DELETE FROM nodes WHERE node_id IN ({placeholders})",
+                    node_ids,
+                )
+            if card_ids:
+                placeholders = ",".join("?" * len(card_ids))
+                # Contentless FTS5 tables reject ordinary DELETE statements.
+                # Use the FTS5 delete command with the original indexed values
+                # before removing the mapping rows; this keeps the index valid
+                # when an edited source is replaced.
+                fts_rows = c.execute(
+                    f"SELECT m.rowid, c.tag, c.read_text, c.cite_raw, c.body "
+                    f"FROM fts_map m JOIN cards c ON c.card_id=m.card_id "
+                    f"WHERE m.card_id IN ({placeholders})", card_ids,
+                ).fetchall()
+                for fts_row in fts_rows:
+                    c.execute(
+                        "INSERT INTO cards_fts(cards_fts, rowid, tag, read_text, cite_raw, body) "
+                        "VALUES('delete',?,?,?,?,?)",
+                        tuple(fts_row),
+                    )
+                c.execute(
+                    f"DELETE FROM fts_map WHERE card_id IN ({placeholders})",
+                    card_ids,
+                )
+                c.execute(
+                    f"DELETE FROM cards WHERE card_id IN ({placeholders})",
+                    card_ids,
+                )
+            c.execute("DELETE FROM sources WHERE source_id=?", (source_id,))
+
+    def card_revision(self) -> tuple[int, int]:
+        """Return a cheap revision marker for the FTS-backed card corpus.
+
+        Search requests can arrive while another ingest updates this same
+        database. Hashing every card id before every query is exact but turns a
+        fast search into an O(n) operation. The append-only FTS map gives us a
+        constant-time marker: count catches deletions and max rowid catches
+        replacements/additions, including a local file edited in place.
+        """
+        row = self.conn.execute(
+            "SELECT COALESCE(MAX(rowid), 0), COUNT(*) FROM fts_map"
+        ).fetchone()
+        return int(row[0]), int(row[1])
+
     def add_cards(self, cards: list[Card]) -> int:
         added = 0
         with self.tx() as c:

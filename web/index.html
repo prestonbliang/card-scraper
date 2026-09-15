@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>cardgraph</title>
+<title>Card Scraper — debate evidence index</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Crect width=%2716%27 height=%2716%27 rx=%273%27 fill=%27%232f5d50%27/%3E%3Crect x=%273%27 y=%275%27 width=%2710%27 height=%272%27 fill=%27%23fff3bf%27/%3E%3Crect x=%273%27 y=%279%27 width=%276%27 height=%272%27 fill=%27%23fff3bf%27/%3E%3C/svg%3E">
 <style>
 :root{
@@ -38,6 +38,8 @@ header{
 .brand span{color:var(--muted);font-weight:400;font-size:12px;margin-left:8px}
 .searchwrap{flex:1;min-width:260px;display:flex;gap:8px;flex-wrap:wrap}
 .searchwrap input[type=search]{min-width:220px}
+.filter-number{width:82px;min-width:0!important}
+.filter-block{min-width:150px!important}
 input[type=search],select{
   font:inherit;padding:8px 11px;border:1px solid var(--line);border-radius:7px;
   background:var(--bg);color:var(--ink);
@@ -177,12 +179,21 @@ h4.sec{font-size:11px;text-transform:uppercase;letter-spacing:.09em;
 .cov.have{background:var(--accent-soft);color:var(--accent)}
 .q{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-top:6px;
   word-break:break-word}
+.catalog-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px}
+.source-card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+.source-card h3{margin:0 0 5px;font-size:15px}
+.source-card .source-kind{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-bottom:8px}
+.source-card p{font-size:12.5px;color:var(--muted);margin:8px 0;line-height:1.45}
+.source-card .source-command{font-family:var(--mono);font-size:10.5px;background:var(--panel-alt);padding:7px 8px;border-radius:6px;word-break:break-word}
+.source-card.gated{border-color:var(--warn)}
+.source-card.gated .source-access{color:var(--warn)}
+.source-access{font-family:var(--mono);font-size:10px;text-transform:uppercase;color:var(--accent);letter-spacing:.06em}
 </style>
 </head>
 <body>
 
 <header>
-  <div class="brand">cardgraph<span>debate evidence index</span></div>
+  <div class="brand">Card Scraper<span>debate evidence index</span></div>
   <div class="searchwrap">
     <input type="search" id="q" placeholder="Search public cases, cards, and arguments…" autocomplete="off">
     <select id="side">
@@ -190,11 +201,15 @@ h4.sec{font-size:11px;text-transform:uppercase;letter-spacing:.09em;
       <option value="neg">neg</option><option value="unknown">unclassified</option>
     </select>
     <input type="search" id="source" placeholder="source / school / year" autocomplete="off" aria-label="Filter by source">
+    <input class="filter-block" type="search" id="block" placeholder="block / contention" autocomplete="off" aria-label="Filter by block">
+    <input class="filter-number" type="number" id="yearMin" min="1900" max="2200" placeholder="from" aria-label="Minimum citation year">
+    <input class="filter-number" type="number" id="yearMax" min="1900" max="2200" placeholder="to" aria-label="Maximum citation year">
     <button class="searchbtn" id="searchBtn">Search</button>
   </div>
   <div class="modes">
     <button id="mSearch" aria-pressed="true">Search</button>
     <button id="mAnalysis" aria-pressed="false">Analysis</button>
+    <button id="mSources" aria-pressed="false">Sources</button>
   </div>
   <div class="stats" id="stats"></div>
 </header>
@@ -214,7 +229,21 @@ const $ = s => document.querySelector(s);
 const el = (t, c, x) => { const n = document.createElement(t); if (c) n.className = c;
   if (x !== undefined) n.textContent = x; return n; };
 const esc = s => (s||"").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const api = async (p) => (await fetch(p)).json();
+const api = async (p, opts = {}) => {
+  const r = await fetch(p, opts);
+  let data = null;
+  try { data = await r.json(); } catch (_) {}
+  if (!r.ok){
+    const detail = data && data.detail ? data.detail : `request failed (${r.status})`;
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
+  return data;
+};
+let viewRequest = 0;
+const showError = (target, err) => {
+  target.innerHTML = "";
+  target.append(el("div", "note", `Could not load this view: ${err.message || err}`));
+};
 
 /* ---------- read-text reconstruction -------------------------------------
    We store body and read_text separately, joined by an elision marker. To show
@@ -282,28 +311,43 @@ function cardEl(c, opts = {}){
 let timer;
 $("#q").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(doSearch, 220); });
 $("#side").addEventListener("change", doSearch);
+$("#yearMin").addEventListener("change", doSearch);
+$("#yearMax").addEventListener("change", doSearch);
 $("#source").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(doSearch, 220); });
+$("#block").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(doSearch, 220); });
 $("#searchBtn").addEventListener("click", doSearch);
 $("#q").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
 
 async function doSearch(){
+  const request = ++viewRequest;
   const q = $("#q").value.trim();
   if (!q){ renderWelcome(); return; }
   const side = $("#side").value;
   const source = $("#source").value.trim();
+  const block = $("#block").value.trim();
+  const yearMin = $("#yearMin").value;
+  const yearMax = $("#yearMax").value;
   const c = $("#content");
   c.innerHTML = '<div class="spin">searching public evidence…</div>';
   const params = new URLSearchParams({ q, k: "25" });
   if (side) params.set("side", side);
   if (source) params.set("source", source);
-  const r = await api(`/api/search?${params}`);
-  c.innerHTML = "";
+  if (block) params.set("block", block);
+  if (yearMin) params.set("year_min", yearMin);
+  if (yearMax) params.set("year_max", yearMax);
+  try {
+    const r = await api(`/api/search?${params}`);
+    if (request !== viewRequest) return;
+    c.innerHTML = "";
   c.append(el("div", "crumb", `${r.count} result${r.count===1?"":"s"} for "${q}"`));
   if (!r.count){
     c.append(el("div", "empty", "Nothing matched. Try the argument in different words, remove the source filter, or ingest a public speech-and-debate case release first."));
     return;
   }
-  r.hits.forEach(h => c.append(cardEl(h, { rank: true })));
+    r.hits.forEach(h => c.append(cardEl(h, { rank: true })));
+  } catch (err) {
+    if (request === viewRequest) showError(c, err);
+  }
 }
 
 /* ---------- tree ---------- */
@@ -358,10 +402,13 @@ async function loadTree(parent, container, depth, opts = {}){
 }
 
 async function showNode(id){
+  const request = ++viewRequest;
   const c = $("#content");
   c.innerHTML = '<div class="spin">loading…</div>';
-  const r = await api(`/api/node/${id}`);
-  c.innerHTML = "";
+  try {
+    const r = await api(`/api/node/${id}`);
+    if (request !== viewRequest) return;
+    c.innerHTML = "";
   c.append(el("div", "crumb", (r.node.path.length ? r.node.path.join("  ›  ") : r.node.title)));
 
   const ans = (r.edges.outgoing || []).filter(e => e.kind === "answers");
@@ -393,13 +440,19 @@ async function showNode(id){
   } else if (r.children.length){
     c.append(el("div", "empty", "No cards directly on this node — open its children in the tree."));
   }
+  } catch (err) {
+    if (request === viewRequest) showError(c, err);
+  }
 }
 
 async function showCard(id){
+  const request = ++viewRequest;
   const c = $("#content");
   c.innerHTML = '<div class="spin">loading…</div>';
-  const d = await api(`/api/card/${id}`);
-  c.innerHTML = "";
+  try {
+    const d = await api(`/api/card/${id}`);
+    if (request !== viewRequest) return;
+    c.innerHTML = "";
   c.append(el("div", "crumb", d.path.length ? d.path.join("  ›  ") : d.source_id));
 
   const box = el("div", "card detail");
@@ -473,9 +526,41 @@ async function showCard(id){
     c.append(el("h4", "sec", "Makes a similar argument"));
     d.similar.forEach(s => c.append(cardEl(s)));
   }
+  } catch (err) {
+    if (request === viewRequest) showError(c, err);
+  }
 }
 
-/* ---------- analysis view ---------- */
+function catalogEl(s){
+  const n = el("article", "source-card " + (s.access === "gated" ? "gated" : ""));
+  const h = el("h3", null, s.name);
+  const a = el("a", "source-access", s.access);
+  a.href = s.url; a.target = "_blank"; a.rel = "noreferrer";
+  n.append(h, a, el("div", "source-kind", s.kind));
+  n.append(el("p", null, s.note));
+  n.append(el("div", "source-command", s.command));
+  return n;
+}
+
+async function showCatalog(){
+  const request = ++viewRequest;
+  const c = $("#content");
+  c.innerHTML = '<div class="spin">loading reviewed sources…</div>';
+  try {
+    const r = await api("/api/catalog");
+    if (request !== viewRequest) return;
+    c.innerHTML = "";
+    c.append(el("div", "crumb", "Reviewed sources · access boundaries are intentional"));
+    c.append(el("p", "empty", "These are source options Card Scraper knows how to handle. Public does not mean redistributable: verify the terms of each file, credit the publisher, and never bypass a login gate."));
+    const grid = el("div", "catalog-grid");
+    r.sources.forEach(s => grid.append(catalogEl(s)));
+    c.append(grid);
+  } catch (err) {
+    if (request === viewRequest) showError(c, err);
+  }
+}
+
+
 let ANALYSIS = null;
 
 function sevTag(sev){ return el("span", "sevtag " + sev, sev); }
@@ -586,9 +671,16 @@ function blockEl(b){
 }
 
 async function showAnalysis(){
+  const request = ++viewRequest;
   const c = $("#content");
   c.innerHTML = '<div class="spin">loading analysis…</div>';
-  if (!ANALYSIS) ANALYSIS = await api("/api/analysis");
+  try {
+    if (!ANALYSIS) ANALYSIS = await api("/api/analysis");
+  } catch (err) {
+    if (request === viewRequest) showError(c, err);
+    return;
+  }
+  if (request !== viewRequest) return;
   c.innerHTML = "";
   if (!ANALYSIS.available){
     const e = el("div", "empty");
@@ -633,11 +725,13 @@ function setMode(m){
   MODE = m;
   $("#mSearch").setAttribute("aria-pressed", String(m === "search"));
   $("#mAnalysis").setAttribute("aria-pressed", String(m === "analysis"));
+  $("#mSources").setAttribute("aria-pressed", String(m === "sources"));
   $("#tree").style.display = m === "search" ? "" : "none";
   document.body.classList.toggle("analysis", m === "analysis");
   document.querySelector("main").style.gridTemplateColumns =
     m === "search" ? "300px 1fr" : "1fr";
   if (m === "analysis") showAnalysis();
+  else if (m === "sources") showCatalog();
   else if ($("#q").value.trim()) doSearch();
   else renderWelcome();
 }
@@ -654,21 +748,32 @@ function renderWelcome(){
 }
 
 (async () => {
-  const s = await api("/api/stats");
-  $("#stats").textContent =
-    `${s.cards} cards · ${s.nodes} nodes · ${s.edges} edges · ${s.sources} sources`;
-  await loadTree(null, $("#treebody"), 0);
+  try {
+    const s = await api("/api/stats");
+    $("#stats").textContent =
+      `${s.cards} cards · ${s.nodes} nodes · ${s.edges} edges · ${s.sources} sources`;
+    await loadTree(null, $("#treebody"), 0);
+  } catch (err) {
+    showError($("#content"), err);
+    $("#treebody").innerHTML = "";
+    $("#treebody").append(el("div", "note", "The outline could not be loaded."));
+  }
   let ft;
   $("#treeFilter").addEventListener("input", () => {
     clearTimeout(ft);
     ft = setTimeout(async () => {
       $("#treebody").innerHTML = "";
-      await loadTree(null, $("#treebody"), 0,
-                     { q: $("#treeFilter").value.trim() });
+      try {
+        await loadTree(null, $("#treebody"), 0,
+                       { q: $("#treeFilter").value.trim() });
+      } catch (err) {
+        $("#treebody").append(el("div", "note", "Could not load the outline."));
+      }
     }, 250);
   });
   $("#mSearch").onclick = () => setMode("search");
   $("#mAnalysis").onclick = () => setMode("analysis");
+  $("#mSources").onclick = () => setMode("sources");
   renderWelcome();
 })();
 </script>

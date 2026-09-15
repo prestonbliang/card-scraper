@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,6 +20,7 @@ from fastapi.responses import FileResponse
 from ..graph.relate import build_all
 from ..index.search import SearchEngine
 from ..index.store import Store
+from ..ingest.policy import source_catalog
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))), "web")
@@ -27,22 +29,35 @@ if not os.path.exists(os.path.join(WEB_DIR, "index.html")):
 
 
 def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
-    app = FastAPI(title="cardgraph", version="0.1.0")
+    store = Store(db_path)
+    engine = SearchEngine(store)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        engine.build()
+        try:
+            yield
+        finally:
+            # SQLite keeps WAL/shm handles open on Windows. Closing the
+            # app-owned store makes embedded TestClient use and clean temp
+            # directories deterministic instead of leaking a connection until
+            # process exit.
+            store.close()
+
+    app = FastAPI(title="Card Scraper", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware, allow_origins=["http://127.0.0.1:8000", "http://localhost:8000"],
         allow_methods=["GET"], allow_headers=["*"],
     )
 
-    store = Store(db_path)
-    engine = SearchEngine(store)
-
-    @app.on_event("startup")
-    def _warm() -> None:
-        engine.build()
-
     @app.get("/api/stats")
     def stats() -> dict:
         return store.stats()
+
+    @app.get("/api/catalog")
+    def catalog() -> dict:
+        """List reviewed source options and their access boundaries."""
+        return {"sources": source_catalog()}
 
     @app.get("/api/sources")
     def sources(limit: int = Query(100, ge=1, le=500),
@@ -63,16 +78,20 @@ def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
 
     @app.get("/api/search")
     def search(
-        q: str = Query(..., min_length=1),
-        k: int = 25,
-        side: str | None = None,
-        author: str | None = None,
-        year_min: int | None = None,
-        year_max: int | None = None,
-        block: str | None = None,
-        min_read_ratio: float | None = None,
-        source: str | None = None,
+        q: str = Query(..., min_length=1, max_length=500),
+        k: int = Query(25, ge=1, le=100),
+        side: str | None = Query(
+            None, pattern="^(aff|neg|both|unknown)$",
+        ),
+        author: str | None = Query(None, max_length=200),
+        year_min: int | None = Query(None, ge=1900, le=2200),
+        year_max: int | None = Query(None, ge=1900, le=2200),
+        block: str | None = Query(None, max_length=200),
+        min_read_ratio: float | None = Query(None, ge=0.0, le=1.0),
+        source: str | None = Query(None, max_length=300),
     ) -> dict:
+        if year_min is not None and year_max is not None and year_min > year_max:
+            raise HTTPException(422, "year_min must not exceed year_max")
         hits = engine.search(q, k=k, side=side, author=author, year_min=year_min,
                              year_max=year_max, block=block,
                              min_read_ratio=min_read_ratio, source=source)
@@ -104,8 +123,10 @@ def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
         return row
 
     @app.get("/api/tree")
-    def tree(parent: str | None = None, limit: int = 200, offset: int = 0,
-             q: str | None = None) -> dict:
+    def tree(parent: str | None = Query(None, max_length=100),
+             limit: int = Query(200, ge=1, le=500),
+             offset: int = Query(0, ge=0),
+             q: str | None = Query(None, max_length=200)) -> dict:
         return store.tree(parent, limit=limit, offset=offset, q=q)
 
     @app.get("/api/node/{node_id}")
@@ -143,7 +164,8 @@ def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
         return payload
 
     @app.post("/api/analysis/run")
-    def run_analysis(top: int = 6, llm: bool = True,
+    def run_analysis(top: int = Query(6, ge=1, le=50),
+                     llm: bool = True,
                      blocks: bool = True) -> dict:
         from ..analysis import analyze
         report = analyze(store, max_positions=top, use_llm=llm,

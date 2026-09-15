@@ -27,8 +27,30 @@ from .index.store import Store
 from .ingest.base import (CaselistArchiveAdapter, GitRepoAdapter,
                           LocalDirAdapter, OnlineEvidenceAdapter,
                           OpenEvidenceAdapter)
-from .ingest.policy import AccessPolicy, AccessRefused, explain_allowlist
+from .ingest.policy import (AccessPolicy, AccessRefused, explain_allowlist,
+                            source_catalog)
 from .parse.docx_card import UnsupportedFormat, parse_any
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
+def _year(value: str) -> int:
+    parsed = int(value)
+    if not 1900 <= parsed <= 2200:
+        raise argparse.ArgumentTypeError("must be between 1900 and 2200")
+    return parsed
+
+
+def _ratio(value: str) -> float:
+    parsed = float(value)
+    if not 0.0 <= parsed <= 1.0:
+        raise argparse.ArgumentTypeError("must be between 0 and 1")
+    return parsed
 
 
 def cmd_ingest(args) -> int:
@@ -106,6 +128,19 @@ def cmd_ingest(args) -> int:
                 print(f"  ! parse failed {os.path.basename(item.path)}: {exc}")
             continue
         item.source.card_count = len(cards)
+        # Local files are versioned by size/mtime. If an existing path changed,
+        # remove its previous cards before inserting the successful replacement;
+        # otherwise stale evidence remains searchable forever.
+        old_ids = [r[0] for r in store.conn.execute(
+            "SELECT source_id FROM sources WHERE path=? AND source_id != ?",
+            (item.source.path, item.source.source_id),
+        )]
+        if args.force and store.conn.execute(
+                "SELECT 1 FROM sources WHERE source_id=?", (item.source.source_id,)
+        ).fetchone():
+            old_ids.append(item.source.source_id)
+        for old_id in old_ids:
+            store.remove_source(old_id)
         store.add_source(item.source)
         added = store.add_cards(cards)
         store.add_outline(root)
@@ -201,19 +236,27 @@ def cmd_graph(args) -> int:
 
 
 def cmd_search(args) -> int:
+    if args.year_min is not None and args.year_max is not None \
+            and args.year_min > args.year_max:
+        print("year-min must not exceed year-max", file=sys.stderr)
+        return 2
     store = Store(args.db)
     engine = SearchEngine(store)
     engine.build()
-    hits = engine.search(args.query, k=args.k, side=args.side,
-                         author=args.author, min_read_ratio=args.min_read_ratio,
-                         source=args.source)
+    hits = engine.search(
+        args.query, k=args.k, side=args.side, author=args.author,
+        year_min=args.year_min, year_max=args.year_max, block=args.block,
+        min_read_ratio=args.min_read_ratio, source=args.source,
+    )
     if not hits:
         print("no results")
         return 0
     for i, h in enumerate(hits, 1):
         print(f"\n{i}. [{h.side}] {h.tag}")
         print(f"   cite : {h.cite_raw[:110]}")
-        print(f"   block: {h.block}")
+        print(f"   source: {h.source_title or h.source_origin or h.source_id}")
+        if h.source_url:
+            print(f"   url   : {h.source_url}")
         print(f"   read : {h.read_text[:220]}")
         print(f"   score: {h.score:.4f}  (lex #{h.lexical_rank}, vec #{h.vector_rank})")
     return 0
@@ -228,6 +271,15 @@ def cmd_stats(args) -> int:
 
 def cmd_policy(args) -> int:
     print(explain_allowlist())
+    return 0
+
+
+def cmd_catalog(args) -> int:
+    """Print reviewed public and gated source profiles."""
+    for source in source_catalog():
+        print(f"{source['name']} [{source['access']}]\n  {source['url']}\n"
+              f"  {source['kind']}\n  {source['note']}\n"
+              f"  command: {source['command']}\n")
     return 0
 
 
@@ -249,7 +301,7 @@ def main(argv: list[str] | None = None) -> int:
                                      "online"])
     i.add_argument("target", nargs="?", default="")
     i.add_argument("--workdir", default="data/corpus")
-    i.add_argument("--limit", type=int, default=None)
+    i.add_argument("--limit", type=_positive_int, default=None)
     i.add_argument("--license", default="verify source terms before use",
                    help="attribution/license note recorded for online sources")
     i.add_argument("--stealth", action="store_true",
@@ -261,26 +313,26 @@ def main(argv: list[str] | None = None) -> int:
     od = sub.add_parser("ingest-opendebate",
                         help="stream the published OpenDebateEvidence dataset")
     od.add_argument("--query", help="substring filter over tag/text")
-    od.add_argument("--year-min", type=int, dest="year_min")
-    od.add_argument("--year-max", type=int, dest="year_max")
+    od.add_argument("--year-min", type=_year, dest="year_min")
+    od.add_argument("--year-max", type=_year, dest="year_max")
     od.add_argument("--event", choices=["ld", "cx"])
     od.add_argument("--side", choices=["A", "N"])
     od.add_argument("--min-duplicates", type=int, dest="min_duplicates",
                     help="keep only cards many teams read (quality proxy)")
-    od.add_argument("--limit", type=int, default=5000)
+    od.add_argument("--limit", type=_positive_int, default=5000)
     od.add_argument("--full", action="store_true",
                     help="use the full dataset instead of the deduplicated one")
     od.set_defaults(func=cmd_ingest_opendebate)
 
     an = sub.add_parser("analyze", help="find weaknesses in your positions")
-    an.add_argument("--top", type=int, default=8,
+    an.add_argument("--top", type=_positive_int, default=8,
                     help="how many positions get the (paid) model pass")
-    an.add_argument("--min-cards", type=int, default=1, dest="min_cards")
+    an.add_argument("--min-cards", type=_positive_int, default=1, dest="min_cards")
     an.add_argument("--no-llm", action="store_true",
                     help="deterministic checks only; fully offline")
     an.add_argument("--no-blocks", action="store_true",
                     help="skip answer-block generation")
-    an.add_argument("--coverage-floor", type=float, default=0.35,
+    an.add_argument("--coverage-floor", type=_ratio, default=0.35,
                     dest="coverage_floor")
     an.add_argument("--owner", metavar="PATTERN",
                     help="restrict to sources whose path or title matches. "
@@ -296,11 +348,14 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("search")
     s.add_argument("query")
-    s.add_argument("-k", type=int, default=10)
+    s.add_argument("-k", type=_positive_int, default=10)
     s.add_argument("--side", choices=["aff", "neg", "both", "unknown"])
     s.add_argument("--author")
+    s.add_argument("--year-min", type=_year, dest="year_min")
+    s.add_argument("--year-max", type=_year, dest="year_max")
+    s.add_argument("--block", help="filter by block or contention name")
     s.add_argument("--source", help="filter by source id, title, origin, or path")
-    s.add_argument("--min-read-ratio", type=float, dest="min_read_ratio")
+    s.add_argument("--min-read-ratio", type=_ratio, dest="min_read_ratio")
     s.set_defaults(func=cmd_search)
 
     st = sub.add_parser("stats")
@@ -309,9 +364,12 @@ def main(argv: list[str] | None = None) -> int:
     po = sub.add_parser("policy")
     po.set_defaults(func=cmd_policy)
 
+    ca = sub.add_parser("catalog", help="show reviewed evidence sources and access notes")
+    ca.set_defaults(func=cmd_catalog)
+
     sv = sub.add_parser("serve")
     sv.add_argument("--host", default="127.0.0.1")
-    sv.add_argument("--port", type=int, default=8000)
+    sv.add_argument("--port", type=_positive_int, default=8000)
     sv.set_defaults(func=cmd_serve)
 
     args = p.parse_args(argv)

@@ -422,4 +422,10 @@ def parse_any(path: str, source_id: str | None = None):
                 "markup; parsing those by guesswork would produce cards whose "
                 "tag and body boundaries are invented, so they are skipped.")
         return parse_caselist_html(path, source_id)
+    if ext == ".pdf":
+        try:
+            from .pdf_card import parse_pdf
+            return parse_pdf(path, source_id)
+        except RuntimeError as exc:
+            raise UnsupportedFormat(path, str(exc)) from exc
     raise UnsupportedFormat(path, f"no parser for {ext} files")

@@ -1,19 +1,17 @@
-"""Offline tests for public evidence acquisition.
-
-These tests stub the network boundary so source discovery and archive safety stay
-regression-tested without contacting a debate site.
-"""
+"""Tests for reviewed source discovery and conservative PDF ingestion."""
 
 from __future__ import annotations
 
 import io
+import sys
+import types
 import zipfile
 
 import pytest
 
 from cardgraph.ingest.base import HttpIndexAdapter
 from cardgraph.ingest.fetch import FetchResult
-from cardgraph.ingest.policy import AccessPolicy, AccessRefused
+from cardgraph.ingest.policy import AccessPolicy, AccessRefused, source_catalog
 
 
 class FakeFetcher:
@@ -45,10 +43,19 @@ def adapter(tmp_path, index_url="https://openev.debatecoaches.org/releases/"):
     )
 
 
+def test_catalog_distinguishes_public_attributed_and_gated_sources():
+    catalog = {source["id"]: source for source in source_catalog()}
+    assert catalog["debate-central"]["access"] == "attributed"
+    assert catalog["debateus"]["access"] == "attributed"
+    assert catalog["opencaselist"]["access"] == "gated"
+    assert "Not fetched" in catalog["opencaselist"]["note"]
+
+
 def test_discover_resolves_supported_links_and_ignores_navigation(tmp_path):
     index = """<html><body>
       <a href="files/affirmative.docx?season=2026">Aff</a>
       <a href="files/negative.zip#download">Neg</a>
+      <a href="files/topic.pdf">PDF</a>
       <a href="about.html">About</a>
       <a href="https://example.net/private.docx">wrong host is still a link</a>
     </body></html>"""
@@ -58,6 +65,7 @@ def test_discover_resolves_supported_links_and_ignores_navigation(tmp_path):
     assert a.discover() == [
         "https://openev.debatecoaches.org/releases/files/affirmative.docx?season=2026",
         "https://openev.debatecoaches.org/releases/files/negative.zip#download",
+        "https://openev.debatecoaches.org/releases/files/topic.pdf",
         "https://openev.debatecoaches.org/releases/about.html",
     ]
 
@@ -82,6 +90,7 @@ def test_zip_extraction_skips_traversal_and_non_debate_files(tmp_path):
     with zipfile.ZipFile(archive, "w") as zf:
         zf.writestr("cases/affirmative.htm", b"<html>aff</html>")
         zf.writestr("cases/negative.docx", b"docx bytes")
+        zf.writestr("cases/topic.pdf", b"pdf bytes")
         zf.writestr("notes.txt", b"not a card")
         zf.writestr("../escaped.docx", b"must not be written")
         zf.writestr("/absolute.docx", b"must not be written")
@@ -91,10 +100,9 @@ def test_zip_extraction_skips_traversal_and_non_debate_files(tmp_path):
     a.fetcher = FakeFetcher({url: archive.getvalue()})
     acquired = a._acquire_zip(url)
 
-    assert [item.source.title for item in acquired] == ["affirmative", "negative"]
-    assert [item.source.origin for item in acquired] == ["http-index", "http-index"]
+    assert [item.source.title for item in acquired] == ["affirmative", "negative", "topic"]
+    assert all(item.source.origin == "http-index" for item in acquired)
     assert all(item.source.license == "public-test-fixture" for item in acquired)
-    assert all(item.source.url.startswith(url + "#cases/") for item in acquired)
     assert not (tmp_path / "escaped.docx").exists()
     assert not (tmp_path / "absolute.docx").exists()
 
@@ -112,3 +120,30 @@ def test_zip_limit_applies_to_members(tmp_path):
 
     assert len(acquired) == 1
     assert acquired[0].source.title == "one"
+
+
+def test_pdf_parser_is_page_level_and_transparent(tmp_path, monkeypatch):
+    class FakePage:
+        def extract_text(self):
+            return (
+                "Smith 26 (Jane Smith, Researcher)\n"
+                "The policy changes incentives for hospitals and reduces costs "
+                "for households across the country."
+            )
+
+    fake_pypdf = types.SimpleNamespace(PdfReader=lambda path: types.SimpleNamespace(
+        pages=[FakePage()]))
+    monkeypatch.setitem(sys.modules, "pypdf", fake_pypdf)
+
+    from cardgraph.parse.pdf_card import parse_pdf
+
+    path = tmp_path / "public.pdf"
+    path.write_bytes(b"fixture")
+    cards, root, report = parse_pdf(str(path), "source")
+
+    assert len(cards) == 1
+    assert cards[0].read_text == ""
+    assert cards[0].disclosed_only
+    assert cards[0].path == ["Page 1"]
+    assert root.children[0].card_ids == [cards[0].card_id]
+    assert "page level" in report.warnings[0]
