@@ -33,8 +33,14 @@ def parse_pdf(path: str, source_id: str | None = None):
     root = OutlineNode(title=os.path.basename(path), kind=NodeKind.POCKET,
                        path=[], source_id=source_id)
     cards: list[Card] = []
-    reader = PdfReader(path)
-
+    try:
+        reader = PdfReader(path)
+    except Exception as exc:
+        # A .pdf suffix is not proof that the payload is a PDF: interrupted
+        # downloads and mislabeled HTML/text files are common in public
+        # indexes. Treat an unreadable document as a clean unsupported input so
+        # one bad release cannot abort an otherwise valid ingest.
+        raise RuntimeError(f"could not read PDF ({exc.__class__.__name__})") from exc
     for page_no, page in enumerate(reader.pages, 1):
         text = (page.extract_text() or "").replace("\x00", "")
         lines = [line.strip() for line in text.splitlines() if line.strip()]
