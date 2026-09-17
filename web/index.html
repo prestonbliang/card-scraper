@@ -42,6 +42,15 @@ header{
 .search-help{font-size:11px;color:var(--muted);display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 .query-example{border:0;background:transparent;color:var(--accent);padding:0;font:inherit;font-size:11px;cursor:pointer;text-decoration:underline;text-underline-offset:2px}
 .query-example:hover{color:var(--ink)}
+.shortcut-hint{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--muted)}
+.recent-searches{margin-top:18px;border-top:1px solid var(--line);padding-top:12px}
+.recent-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.recent-head h3{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0}
+.recent-clear{border:0;background:transparent;color:var(--muted);font-size:11px;text-decoration:underline;padding:0}
+.recent-clear:hover{color:var(--accent)}
+.recent-list{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px}
+.recent-query{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:99px;padding:6px 10px;font-size:12px;text-align:left;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.recent-query:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
 .advanced{font-size:12px;color:var(--muted)}
 .advanced summary{cursor:pointer;display:inline-block;padding:2px 0;user-select:none}
 .advanced summary:hover{color:var(--accent)}
@@ -103,6 +112,27 @@ body.analysis #content{max-width:1180px}
       padding:14px 16px;margin-bottom:12px}
 .card h3{margin:0 0 6px;font-size:15px;line-height:1.4;font-weight:650;cursor:pointer}
 .card h3:hover{color:var(--accent)}
+.card-title-row{display:flex;align-items:flex-start;gap:10px}
+.card-title-row h3{flex:1}
+.pin-btn{border:1px solid var(--line);background:var(--panel);color:var(--muted);border-radius:6px;padding:4px 8px;font-size:11px;white-space:nowrap}
+.pin-btn:hover,.pin-btn.pinned{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
+.board-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+.board-toolbar h2{font-size:18px;margin:0}
+.board-actions{display:flex;gap:7px;flex-wrap:wrap}
+.board-btn{border:1px solid var(--line);background:var(--panel);color:var(--muted);border-radius:7px;padding:7px 10px;font-size:12px}
+.board-btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.board-btn:hover{border-color:var(--accent);color:var(--accent)}
+.board-btn.primary:hover{color:#fff}
+.board-columns{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+.board-column{min-width:0}
+.board-column h3{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 9px}
+.board-column .card{margin-bottom:9px;padding:11px 12px}
+.board-column .read{font-size:14px}
+.board-card{cursor:grab}
+.board-card:active{cursor:grabbing}
+.board-note{width:100%;min-height:54px;resize:vertical;margin-top:9px;padding:7px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);font:12px/1.4 var(--sans)}
+.board-note:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
+@media(max-width:700px){.board-columns{grid-template-columns:1fr}}
 .source-line{font-size:11px;color:var(--muted);margin-top:8px;display:flex;gap:7px;align-items:center;flex-wrap:wrap}
 .source-line a{font-family:var(--mono);font-size:10.5px}
 .source-tag{font-family:var(--mono);font-size:10px;padding:2px 6px;border-radius:4px;background:var(--panel-alt);color:var(--muted)}
@@ -233,6 +263,7 @@ h4.sec{font-size:11px;text-transform:uppercase;letter-spacing:.09em;
       <span>or</span>
       <button class="query-example" type="button" data-query="household costs">household costs</button>
       <span class="search-hint">Use “from 2024” or “negative cards” in the search itself.</span>
+      <span class="shortcut-hint">Press / to focus · Esc to clear</span>
       <details class="advanced">
         <summary id="filterSummary">Filters</summary>
         <div class="filters">
@@ -258,6 +289,7 @@ h4.sec{font-size:11px;text-transform:uppercase;letter-spacing:.09em;
     <button id="mSearch" aria-pressed="true">Search</button>
     <button id="mAnalysis" aria-pressed="false">Analysis</button>
     <button id="mSources" aria-pressed="false">Sources</button>
+    <button id="mBoard" aria-pressed="false">Board <span id="boardCount"></span></button>
   </div>
   <div class="stats" id="stats"></div>
 </header>
@@ -323,11 +355,60 @@ function renderBodyWithMarks(body, readText, emphText){
 }
 
 /* ---------- card rendering ---------- */
+const PINNED_KEY = "card-scraper:pinned-cards";
+const PINNED_ORDER_KEY = "card-scraper:pinned-order";
+let PINNED = {};
+let PINNED_ORDER = [];
+try { PINNED = JSON.parse(localStorage.getItem(PINNED_KEY) || "{}"); } catch (_) { PINNED = {}; }
+try { PINNED_ORDER = JSON.parse(localStorage.getItem(PINNED_ORDER_KEY) || "[]"); } catch (_) { PINNED_ORDER = []; }
+
+function orderedPinned(){
+  const ids = Object.keys(PINNED);
+  const known = PINNED_ORDER.filter(id => PINNED[id]);
+  return [...known, ...ids.filter(id => !known.includes(id))];
+}
+
+function savePinned(){
+  PINNED_ORDER = orderedPinned();
+  try {
+    localStorage.setItem(PINNED_KEY, JSON.stringify(PINNED));
+    localStorage.setItem(PINNED_ORDER_KEY, JSON.stringify(PINNED_ORDER));
+  } catch (_) {}
+  $("#boardCount").textContent = Object.keys(PINNED).length ? `(${Object.keys(PINNED).length})` : "";
+}
+
+function pinButton(c){
+  const pinned = Boolean(PINNED[c.card_id]);
+  const button = el("button", "pin-btn" + (pinned ? " pinned" : ""), pinned ? "Pinned" : "Pin");
+  button.type = "button";
+  button.setAttribute("aria-pressed", String(pinned));
+  button.title = pinned ? "Remove from research board" : "Add to research board";
+  button.onclick = (event) => {
+    event.stopPropagation();
+    if (PINNED[c.card_id]) {
+      delete PINNED[c.card_id];
+      PINNED_ORDER = PINNED_ORDER.filter(id => id !== c.card_id);
+    } else {
+      PINNED[c.card_id] = {...c};
+      PINNED_ORDER.push(c.card_id);
+    }
+    savePinned();
+    button.classList.toggle("pinned", Boolean(PINNED[c.card_id]));
+    button.textContent = PINNED[c.card_id] ? "Pinned" : "Pin";
+    button.setAttribute("aria-pressed", String(Boolean(PINNED[c.card_id])));
+    button.title = PINNED[c.card_id] ? "Remove from research board" : "Add to research board";
+    if (MODE === "board") showBoard();
+  };
+  return button;
+}
+
 function cardEl(c, opts = {}){
   const n = el("div", "card");
+  const title = el("div", "card-title-row");
   const h = el("h3", null, c.tag);
   h.onclick = () => showCard(c.card_id);
-  n.append(h);
+  title.append(h, pinButton(c));
+  n.append(title);
   if (c.cite_raw) n.append(el("div", "cite", c.cite_raw));
   if (c.source_title || c.source_origin){
     const line = el("div", "source-line");
@@ -392,6 +473,96 @@ async function copyUrlToClipboard(button, {sync = true} = {}){
   setTimeout(() => { button.textContent = "Copy link"; }, 1400);
 }
 
+function boardText(card){
+  const side = card.side === "aff" ? "Affirmative" : card.side === "neg" ? "Negative" : "Unclassified";
+  return `- ${card.tag || "Untitled"} [${side}]\n  Citation: ${card.cite_raw || "not available"}\n  Source: ${card.source_title || card.source_id || "not recorded"}${card.source_url ? ` — ${card.source_url}` : ""}\n  Read text: ${card.read_text || "(no read text parsed)"}\n  Private note: ${card.note || "(none)"}`;
+}
+
+function exportBoard(){
+  const cards = orderedPinned().map(id => PINNED[id]);
+  const groups = [["Affirmative", cards.filter(c => c.side === "aff")], ["Negative", cards.filter(c => c.side === "neg")], ["Unclassified", cards.filter(c => !["aff", "neg"].includes(c.side))]];
+  const text = [
+    "# Card Scraper research board", "",
+    "Pinned evidence for review — retrieval metadata is not a factual verdict.", "",
+    ...groups.flatMap(([name, items]) => {
+      const body = items.length ? items.flatMap(c => [boardText(c), ""]) : ["(none)", ""];
+      return [`## ${name}`, "", ...body];
+    }),
+  ].join("\n");
+  const blob = new Blob([text], {type: "text/markdown;charset=utf-8"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a"); a.href = url; a.download = "card-scraper-research-board.md";
+  a.click(); URL.revokeObjectURL(url);
+}
+
+function reorderPinned(draggedId, targetId){
+  const order = orderedPinned().filter(id => id !== draggedId);
+  const at = order.indexOf(targetId);
+  order.splice(at < 0 ? order.length : at, 0, draggedId);
+  PINNED_ORDER = order;
+  savePinned();
+  showBoard();
+}
+
+function boardCardEl(card){
+  const node = cardEl(card);
+  node.classList.add("board-card");
+  node.draggable = true;
+  node.dataset.cardId = card.card_id;
+  node.addEventListener("dragstart", event => {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", card.card_id);
+  });
+  node.addEventListener("dragover", event => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; });
+  node.addEventListener("drop", event => {
+    event.preventDefault();
+    const dragged = event.dataTransfer.getData("text/plain");
+    if (dragged && dragged !== card.card_id) reorderPinned(dragged, card.card_id);
+  });
+  const note = document.createElement("textarea");
+  note.className = "board-note";
+  note.placeholder = "Private note for this card…";
+  note.value = card.note || "";
+  note.setAttribute("aria-label", `Private note for ${card.tag || "card"}`);
+  note.addEventListener("input", () => {
+    if (PINNED[card.card_id]) { PINNED[card.card_id].note = note.value; savePinned(); }
+  });
+  note.addEventListener("click", event => event.stopPropagation());
+  node.append(note);
+  return node;
+}
+
+function showBoard(){
+  const request = ++viewRequest;
+  const c = $("#content"); c.innerHTML = "";
+  const cards = orderedPinned().map(id => PINNED[id]);
+  const toolbar = el("div", "board-toolbar");
+  toolbar.append(el("h2", null, "Research board"));
+  const actions = el("div", "board-actions");
+  const exportButton = el("button", "board-btn primary", "Export cited brief");
+  exportButton.type = "button"; exportButton.disabled = !cards.length; exportButton.onclick = exportBoard;
+  const clear = el("button", "board-btn", "Clear board");
+  clear.type = "button"; clear.disabled = !cards.length;
+  clear.onclick = () => { PINNED = {}; PINNED_ORDER = []; savePinned(); showBoard(); };
+  actions.append(exportButton, clear); toolbar.append(actions); c.append(toolbar);
+  if (!cards.length){
+    const empty = el("div", "empty");
+    empty.append(el("h2", null, "Your board is empty."));
+    empty.append(el("p", null, "Pin cards from search results to compare affirmative and negative evidence here. Pins stay in this browser only."));
+    c.append(empty); return;
+  }
+  c.append(el("p", "q", `${cards.length} pinned card${cards.length === 1 ? "" : "s"} · stored locally in this browser`));
+  const columns = el("div", "board-columns");
+  [["Affirmative", "aff"], ["Negative", "neg"], ["Unclassified", "unknown"]].forEach(([label, side]) => {
+    const column = el("section", "board-column");
+    const items = cards.filter(card => (card.side || "unknown") === side);
+    column.append(el("h3", null, `${label} · ${items.length}`));
+    items.forEach(card => column.append(boardCardEl(card)));
+    columns.append(column);
+  });
+  c.append(columns);
+}
+
 function detailShare(kind, id){
   const button = el("button", "copybtn detail-share", "Copy link");
   button.type = "button";
@@ -427,6 +598,19 @@ $("#clearFilters").addEventListener("click", () => {
   if ($("#q").value.trim()) doSearch({pushUrl: true});
   else syncUrl({pushUrl: true});
 });
+document.addEventListener("keydown", e => {
+  const active = document.activeElement;
+  const typing = active && (active.matches("input, textarea, select") || active.isContentEditable);
+  if (e.key === "/" && !typing){
+    e.preventDefault(); $("#q").focus();
+  }
+  if (e.key === "Escape" && $("#q").value && (typing || MODE === "search")){
+    $("#q").value = "";
+    syncUrl({pushUrl: true});
+    renderWelcome();
+  }
+});
+
 document.querySelectorAll(".query-example").forEach(button => {
   button.addEventListener("click", () => {
     $("#q").value = button.dataset.query || "";
@@ -474,7 +658,7 @@ function restoreUrlState(){
   $("#block").value = params.get("block") || "";
   updateFilterSummary();
   const detailView = params.get("card") || params.get("node");
-  const view = detailView ? "search" : (["analysis", "sources"].includes(params.get("view"))
+  const view = detailView ? "search" : (["analysis", "sources", "board"].includes(params.get("view"))
     ? params.get("view") : "search");
   setMode(view, {updateUrl: false});
   if (params.get("card")) showCard(params.get("card"), {updateUrl: false});
@@ -483,6 +667,52 @@ function restoreUrlState(){
 
 window.addEventListener("popstate", () => restoreUrlState());
 
+const RECENT_SEARCHES_KEY = "card-scraper:recent-searches";
+
+function getRecentSearches(){
+  try {
+    const saved = JSON.parse(localStorage.getItem(RECENT_SEARCHES_KEY) || "[]");
+    return Array.isArray(saved) ? saved.filter(x => typeof x === "string" && x.trim()).slice(0, 6) : [];
+  } catch (_) { return []; }
+}
+
+function rememberSearch(query){
+  const normalized = query.trim();
+  if (!normalized) return;
+  try {
+    const next = [normalized, ...getRecentSearches().filter(x => x.toLowerCase() !== normalized.toLowerCase())].slice(0, 6);
+    localStorage.setItem(RECENT_SEARCHES_KEY, JSON.stringify(next));
+  } catch (_) { /* private browsing may deny storage; search still works */ }
+}
+
+function renderRecentSearches(target){
+  const recent = getRecentSearches();
+  if (!recent.length) return;
+  const wrap = el("div", "recent-searches");
+  const head = el("div", "recent-head");
+  head.append(el("h3", null, "Recent searches"));
+  const clear = el("button", "recent-clear", "Clear history");
+  clear.type = "button";
+  clear.onclick = () => {
+    try { localStorage.removeItem(RECENT_SEARCHES_KEY); } catch (_) {}
+    wrap.remove();
+  };
+  head.append(clear); wrap.append(head);
+  const list = el("div", "recent-list");
+  recent.forEach(query => {
+    const button = el("button", "recent-query", query);
+    button.type = "button";
+    button.title = query;
+    button.onclick = () => {
+      $("#q").value = query;
+      doSearch({pushUrl: true});
+      $("#q").focus();
+    };
+    list.append(button);
+  });
+  wrap.append(list); target.append(wrap);
+}
+
 async function doSearch({pushUrl = false} = {}){
   const request = ++viewRequest;
   const q = $("#q").value.trim();
@@ -490,6 +720,7 @@ async function doSearch({pushUrl = false} = {}){
     if (pushUrl) syncUrl({pushUrl: true});
     renderWelcome(); return;
   }
+  rememberSearch(q);
   syncUrl({pushUrl});
   const side = $("#side").value;
   const source = $("#source").value.trim();
@@ -636,6 +867,7 @@ async function showCard(id, {updateUrl = true} = {}){
   c.append(detailShare("card", id));
 
   const box = el("div", "card detail");
+  box.append(pinButton(d));
   box.append(el("h3", null, d.tag));
   if (d.cite_raw) box.append(el("div", "cite", d.cite_raw));
   if (d.source_title || d.source_origin){
@@ -907,6 +1139,7 @@ function setMode(m, {updateUrl = true} = {}){
   $("#mSearch").setAttribute("aria-pressed", String(m === "search"));
   $("#mAnalysis").setAttribute("aria-pressed", String(m === "analysis"));
   $("#mSources").setAttribute("aria-pressed", String(m === "sources"));
+  $("#mBoard").setAttribute("aria-pressed", String(m === "board"));
   $("#tree").style.display = m === "search" ? "" : "none";
   document.body.classList.toggle("analysis", m === "analysis");
   document.querySelector("main").style.gridTemplateColumns =
@@ -914,6 +1147,7 @@ function setMode(m, {updateUrl = true} = {}){
   if (updateUrl) syncUrl({view: m});
   if (m === "analysis") showAnalysis();
   else if (m === "sources") showCatalog();
+  else if (m === "board") showBoard();
   else if ($("#q").value.trim()) doSearch();
   else renderWelcome();
 }
@@ -931,6 +1165,7 @@ function renderWelcome(){
     : "Searches combine exact text with semantic matching over read text, tags, citations, and public case releases. Use Smart Search for natural-language requests.");
   const p2 = el("p", null, "To add public evidence, run `cardgraph ingest local ./my-files` or `cardgraph ingest online <public index or file URL>` after checking its terms. Login-gated sources are intentionally not bypassed.");
   e.append(p1, p2);
+  renderRecentSearches(e);
   c.append(e);
 }
 
@@ -962,6 +1197,8 @@ function renderWelcome(){
   $("#mSearch").onclick = () => setMode("search");
   $("#mAnalysis").onclick = () => setMode("analysis");
   $("#mSources").onclick = () => setMode("sources");
+  $("#mBoard").onclick = () => setMode("board");
+  savePinned();
   restoreUrlState();
 })();
 </script>

@@ -136,7 +136,13 @@ query, Smart toggle, precision mode, side/source/block filters, and current view
 are encoded in the address bar. Use **Copy link** to send a teammate the exact
 search state; browser Back/Forward restores it without losing the result. Cards
 and contention/block details have their own **Copy link** button too, so a
-shared URL can open the exact evidence or argument node directly.
+shared URL can open the exact evidence or argument node directly. The browser also keeps the last six searches locally for quick reuse; `/` focuses search and
+`Esc` clears it without sending anything to a server. Use **Pin** on any result to
+send it to the local **Board**, where affirmative, negative, and unclassified
+cards are compared side by side. **Export cited brief** downloads a Markdown
+review packet with each card's citation, provenance, and read text; it does not
+upload your evidence anywhere.
+
 
 The API exposes the same provenance through `GET /api/sources`; `/api/search`
 returns `source_title`, `source_origin`, and `source_url` for each hit.
