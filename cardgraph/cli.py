@@ -273,6 +273,7 @@ def cmd_search(args) -> int:
             print(f"   url   : {h.source_url}")
         print(f"   read : {h.read_text[:220]}")
         print(f"   match: {h.confidence} · {h.match_type}  (lex #{h.lexical_rank}, vec #{h.vector_rank})")
+        print(f"   evidence: {h.evidence_status} · read coverage {h.read_ratio:.0%}")
         print(f"   score: {h.score:.4f}")
     return 0
 

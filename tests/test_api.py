@@ -49,6 +49,8 @@ def test_api_search_and_card_preserve_provenance(tmp_path):
         assert any("lexical rank" in reason for reason in hit["match_reasons"])
         assert hit["confidence"] in {"high", "medium", "exploratory"}
         assert hit["match_type"] in {"exact", "hybrid", "lexical", "semantic"}
+        assert hit["evidence_status"] == "traceable"
+        assert hit["read_ratio"] > 0
 
         detail = client.get(f"/api/card/{hit['card_id']}")
         assert detail.status_code == 200
@@ -73,6 +75,7 @@ def test_api_smart_search_returns_transparent_variants_and_provenance(tmp_path):
         assert payload["hits"][0]["match_reasons"]
         assert payload["hits"][0]["confidence"] in {"medium", "exploratory"}
         assert payload["hits"][0]["match_type"] == "semantic"
+        assert payload["hits"][0]["evidence_status"] == "traceable"
 
         overridden = client.get("/api/smart-search", params={
             "q": "negative cards about grid", "side": "aff",

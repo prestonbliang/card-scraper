@@ -151,6 +151,10 @@ body.analysis #content{max-width:1180px}
 .confidence-badge.high{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
 .confidence-badge.medium{color:var(--warn);border-color:var(--warn);background:var(--warn-bg)}
 .confidence-badge.exploratory{color:var(--muted);border-color:var(--line);background:var(--panel-alt)}
+.evidence-badge{font-size:10px;font-family:var(--mono);padding:2px 7px;border-radius:99px;white-space:nowrap;border:1px solid}
+.evidence-badge.traceable{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
+.evidence-badge.attributed{color:var(--warn);border-color:var(--warn);background:var(--warn-bg)}
+.evidence-badge.needs-review{color:var(--neg);border-color:var(--neg);background:color-mix(in srgb,var(--neg) 10%,transparent)}
 
 .detail .body{font-family:var(--serif);font-size:15px;line-height:1.65;
               color:var(--muted);margin-top:10px}
@@ -445,6 +449,17 @@ function cardEl(c, opts = {}){
   if (c.side && c.side !== "unknown") m.append(el("span", "pill " + c.side, c.side));
   if (c.block) m.append(el("span", "pill", c.block));
   (c.warrant_flags || []).forEach(f => m.append(el("span", "pill flag", f.replace(/_/g," "))));
+  if (c.evidence_status){
+    const labels = {traceable: "Traceable evidence", attributed: "Attributed", "needs-review": "Needs review"};
+    const badge = el("span", "evidence-badge " + c.evidence_status,
+      labels[c.evidence_status] || c.evidence_status);
+    badge.title = c.evidence_status === "traceable"
+      ? "The result has a citation, source identity, and read text or disclosed text. This describes traceability, not factual correctness or redistribution rights."
+      : c.evidence_status === "attributed"
+        ? "The result has a citation and source identity, but no parsed read text. Verify it against the original before relying on it."
+        : "The result is missing citation or source metadata. Treat it as a lead, not ready-to-cut evidence.";
+    m.append(badge);
+  }
   if (c.confidence){
     const labels = {high: "High confidence", medium: "Strong match", exploratory: "Explore match"};
     const badge = el("span", "confidence-badge " + c.confidence,

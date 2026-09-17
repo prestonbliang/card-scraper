@@ -40,6 +40,8 @@ def test_search_state_is_shareable_and_restorable():
         'Private note for this card',
         'function highlightedRead(text, reasons)',
         'el("mark", "search-hit", part)',
+        'evidence-badge',
+        'Traceable evidence',
     ):
         assert marker in html
 

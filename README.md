@@ -8,6 +8,16 @@ every file you own, and then reads your positions the way a prepared opponent
 would: reconstructing each internal link chain, marking the steps no card
 supports, and naming the answers you have no block for.
 
+## What is Card Scraper?
+
+Card Scraper is a **local-first web application**, not a hosted public website.
+The Python CLI and library ingest and index your evidence; `cardgraph serve`
+starts a local FastAPI server; and the browser UI is the research workspace at
+`http://127.0.0.1:8000`. It can run entirely offline after installation, keeps
+searches, pins, notes, and indexed evidence on your machine, and does not
+require an account. Optional network ingestion and optional model analysis are
+separate capabilities, not prerequisites for searching.
+
 ```bash
 pip install -r requirements.txt
 
@@ -133,7 +143,14 @@ terms are highlighted in the read text so a debater can scan why a result
 matched before opening it. **Strong
 match** means lexical and semantic signals support it; **Explore match** means
 it was found semantically and should be verified against the card before use.
-These are retrieval signals, not truth scores. Search URLs are shareable: the
+These are retrieval signals, not truth scores. Results also carry an evidence
+integrity badge: **Traceable evidence** means the citation, source identity, and
+read/disclosed text are present; **Attributed** means citation and source exist
+but read text is missing; **Needs review** means the result is not ready to cut.
+This is the core difference from a generic scraper: Card Scraper tells you not
+only what matched, but whether you can trace and verify it before a round.
+
+Search URLs are shareable: the
 query, Smart toggle, precision mode, side/source/block filters, and current view
 are encoded in the address bar. Use **Copy link** to send a teammate the exact
 search state; browser Back/Forward restores it without losing the result. Cards
@@ -337,4 +354,7 @@ run `authorized_session` on anyone's behalf but your own.
 
 ## License
 
-MIT for this code. It says nothing about the licenses of documents you index.
+The Card Scraper source code is released under the [MIT License](LICENSE).
+That license covers this software only; it does not grant rights to redistribute
+documents or evidence files you index. Review each source's terms before sharing
+an indexed corpus or exported brief.

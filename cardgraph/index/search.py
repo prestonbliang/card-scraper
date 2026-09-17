@@ -24,6 +24,7 @@ are willing to carry a 2GB dependency.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import pickle
 import re
@@ -57,6 +58,10 @@ class Hit:
     match_reasons: list[str] | None = None
     confidence: str = "exploratory"
     match_type: str = "semantic"
+    read_ratio: float = 0.0
+    disclosed_only: bool = False
+    warrant_flags: list[str] | None = None
+    evidence_status: str = "needs-review"
 
     def to_dict(self) -> dict:
         return {
@@ -72,6 +77,10 @@ class Hit:
             "match_reasons": self.match_reasons or [],
             "confidence": self.confidence,
             "match_type": self.match_type,
+            "read_ratio": round(self.read_ratio, 4),
+            "disclosed_only": self.disclosed_only,
+            "warrant_flags": self.warrant_flags or [],
+            "evidence_status": self.evidence_status,
         }
 
 
@@ -532,6 +541,32 @@ class SearchEngine:
             match_type, confidence = "semantic", "exploratory"
         return confidence, match_type
 
+    @staticmethod
+    def _evidence_status(row: dict) -> str:
+        """Describe traceability, never factual truth or source legality."""
+        has_citation = bool((row.get("cite_raw") or "").strip())
+        has_source = bool((row.get("source_id") or "").strip())
+        has_read_text = bool((row.get("read_text") or "").strip())
+        disclosed = bool(row.get("disclosed_only"))
+        if has_citation and has_source and (has_read_text or disclosed):
+            return "traceable"
+        if has_citation and has_source:
+            return "attributed"
+        return "needs-review"
+
+    @staticmethod
+    def _warrant_flags(row: dict) -> list[str]:
+        value = row.get("warrant_flags")
+        if isinstance(value, list):
+            return value
+        if not value:
+            return []
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, list) else []
+        except (TypeError, json.JSONDecodeError):
+            return []
+
     @classmethod
     def _match_reasons(cls, query: str, row: dict, lexical_rank: int | None,
                        vector_rank: int | None) -> list[str]:
@@ -632,6 +667,10 @@ class SearchEngine:
                 match_type=self._match_quality(
                     query, r, lex_rank.get(cid), vec_rank.get(cid),
                 )[1],
+                read_ratio=float(r.get("read_ratio") or 0.0),
+                disclosed_only=bool(r.get("disclosed_only")),
+                warrant_flags=self._warrant_flags(r),
+                evidence_status=self._evidence_status(r),
             ))
             if len(hits) >= k:
                 break
