@@ -444,14 +444,14 @@ class TestCoverage:
         e.build()
         assert e.covers("zebra grazing patterns in the Serengeti") == []
 
-    def test_ranked_search_would_have_lied(self, store):
-        """The bug this exists to prevent: `search` returns its top k for any
-        query at all, so an unsupported argument looks covered."""
+    def test_ranked_search_rejects_unsupported_queries(self, store):
+        """Ranked retrieval must not manufacture confident-looking hits for
+        an unsupported argument; coverage and search should agree."""
         e = SearchEngine(store)
         e.build()
         q = "zebra grazing patterns in the Serengeti"
-        assert e.search(q, k=4), "ranked search returns hits for anything"
-        assert e.covers(q) == [], "coverage must not"
+        assert e.search(q, k=4) == []
+        assert e.covers(q) == []
 
     def test_own_cards_are_excluded(self, store):
         e = SearchEngine(store)

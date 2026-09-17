@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from ..graph.relate import build_all
-from ..index.search import SearchEngine
+from ..index.search import SearchEngine, parse_smart_request
 from ..index.store import Store
 from ..ingest.policy import source_catalog
 
@@ -89,13 +89,55 @@ def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
         block: str | None = Query(None, max_length=200),
         min_read_ratio: float | None = Query(None, ge=0.0, le=1.0),
         source: str | None = Query(None, max_length=300),
+        mode: str = Query("balanced", pattern="^(strict|balanced|explore)$"),
     ) -> dict:
         if year_min is not None and year_max is not None and year_min > year_max:
             raise HTTPException(422, "year_min must not exceed year_max")
         hits = engine.search(q, k=k, side=side, author=author, year_min=year_min,
                              year_max=year_max, block=block,
-                             min_read_ratio=min_read_ratio, source=source)
+                             min_read_ratio=min_read_ratio, source=source,
+                             mode=mode)
         return {"query": q, "count": len(hits), "hits": [h.to_dict() for h in hits]}
+
+    @app.get("/api/smart-search")
+    def smart_search(
+        q: str = Query(..., min_length=1, max_length=500),
+        k: int = Query(25, ge=1, le=100),
+        side: str | None = Query(None, pattern="^(aff|neg|both|unknown)$"),
+        author: str | None = Query(None, max_length=200),
+        year_min: int | None = Query(None, ge=1900, le=2200),
+        year_max: int | None = Query(None, ge=1900, le=2200),
+        block: str | None = Query(None, max_length=200),
+        min_read_ratio: float | None = Query(None, ge=0.0, le=1.0),
+        source: str | None = Query(None, max_length=300),
+        mode: str = Query("balanced", pattern="^(strict|balanced|explore)$"),
+    ) -> dict:
+        """Expand conversational debate requests without generating evidence.
+
+        Every returned hit is still retrieved from the local index; ``variants``
+        makes the transparent query expansion visible to the caller.
+        """
+        if year_min is not None and year_max is not None and year_min > year_max:
+            raise HTTPException(422, "year_min must not exceed year_max")
+        interpreted_query, inferred = parse_smart_request(q)
+        explicit = {
+            key: value for key, value in {
+                "side": side, "author": author, "year_min": year_min,
+                "year_max": year_max, "block": block,
+                "min_read_ratio": min_read_ratio, "source": source,
+            }.items() if value is not None
+        }
+        interpreted = {**inferred, **explicit}
+        hits, variants = engine.smart_search(
+            q, k=k, side=side, author=author, year_min=year_min,
+            year_max=year_max, block=block, min_read_ratio=min_read_ratio,
+            source=source, mode=mode,
+        )
+        return {
+            "query": q, "interpreted_query": interpreted_query,
+            "interpreted_filters": interpreted, "variants": variants,
+            "count": len(hits), "hits": [h.to_dict() for h in hits],
+        }
 
     @app.get("/api/card/{card_id}")
     def card(card_id: str) -> dict:

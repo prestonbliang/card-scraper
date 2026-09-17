@@ -27,7 +27,7 @@ import hashlib
 import os
 import pickle
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -53,6 +53,10 @@ class Hit:
     source_url: str | None = None
     lexical_rank: int | None = None
     vector_rank: int | None = None
+    matched_queries: list[str] | None = None
+    match_reasons: list[str] | None = None
+    confidence: str = "exploratory"
+    match_type: str = "semantic"
 
     def to_dict(self) -> dict:
         return {
@@ -64,6 +68,10 @@ class Hit:
             "lexical_rank": self.lexical_rank, "vector_rank": self.vector_rank,
             "source_title": self.source_title, "source_origin": self.source_origin,
             "source_url": self.source_url,
+            "matched_queries": self.matched_queries or [],
+            "match_reasons": self.match_reasons or [],
+            "confidence": self.confidence,
+            "match_type": self.match_type,
         }
 
 
@@ -223,7 +231,9 @@ class VectorIndex:
         return True
 
     def query(self, text: str, k: int = 50,
-              allowed: set[str] | None = None) -> list[tuple[str, float]]:
+              allowed: set[str] | None = None,
+              include_nonpositive: bool = False,
+              min_similarity: float = 0.0) -> list[tuple[str, float]]:
         if k <= 0 or self.matrix is None or self._vec is None or not self.card_ids:
             return []
         from sklearn.preprocessing import normalize
@@ -239,13 +249,133 @@ class VectorIndex:
             )
             sims[~allowed_mask] = -np.inf
         order = np.argsort(-sims)[:k]
+        # Do not return zero/negative cosine entries. A zero query vector
+        # (unknown words such as a typo) otherwise produces every card in
+        # arbitrary corpus order, making search look confident when it found
+        # nothing. Negative cosine values are also anti-matches, not results.
         return [(self.card_ids[i], float(sims[i])) for i in order
-                if np.isfinite(sims[i])]
+                if np.isfinite(sims[i]) and
+                (include_nonpositive or sims[i] > min_similarity)]
 
 
 def _like_pattern(value: str) -> str:
     """Build a literal substring pattern for SQLite LIKE."""
     return "%" + value.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+_SMART_PREFIX = re.compile(
+    r"^(?:please\s+)?(?:find|show|search(?:\s+for)?|give me|i need|locate)\s+",
+    re.IGNORECASE,
+)
+_SMART_FILLER = re.compile(
+    r"\b(?:cards?|evidence|arguments?|that|which|saying|about|on|related to|"
+    r"according to|for my case|in debate)\b",
+    re.IGNORECASE,
+)
+_SMART_SIDE = re.compile(
+    r"\b(?:on\s+the\s+)?(?P<side>affirmative|aff|negative|neg)\s+(?:side|cards?|case)\b",
+    re.IGNORECASE,
+)
+_SMART_YEAR_RANGE = re.compile(
+    r"\b(?:between\s+)?(?P<first>19\d{2}|20\d{2}|21\d{2})\s+"
+    r"(?:and|to|through|-)\s+(?P<second>19\d{2}|20\d{2}|21\d{2})\b",
+    re.IGNORECASE,
+)
+_SMART_YEAR_FROM = re.compile(
+    r"\b(?:from|after|since)\s+(?P<year>19\d{2}|20\d{2}|21\d{2})\b",
+    re.IGNORECASE,
+)
+_SMART_YEAR_TO = re.compile(
+    r"\b(?:before|until|through|up\s+to)\s+(?P<year>19\d{2}|20\d{2}|21\d{2})\b",
+    re.IGNORECASE,
+)
+_SMART_YEAR_IN = re.compile(
+    r"\bin\s+(?P<year>19\d{2}|20\d{2}|21\d{2})\b",
+    re.IGNORECASE,
+)
+_SMART_SYNONYMS = {
+    "ban": ("ban", "prohibition", "moratorium"),
+    "bans": ("ban", "prohibition", "moratorium"),
+    "cost": ("cost", "rate", "burden"),
+    "costs": ("cost", "rates", "burden"),
+    "emissions": ("emissions", "pollution", "carbon"),
+    "household": ("household", "ratepayer", "residential"),
+    "households": ("households", "ratepayers", "residential"),
+    "nuclear": ("nuclear", "reactor", "atomic"),
+    "renewable": ("renewable", "clean energy", "wind solar"),
+}
+
+
+def parse_smart_request(query: str) -> tuple[str, dict[str, str | int]]:
+    """Extract only unambiguous debate filters from a natural-language request.
+
+    This intentionally recognizes a small grammar rather than guessing from
+    arbitrary prose. For example, ``negative cards from 2024 about nuclear``
+    becomes ``nuclear`` with ``side=neg`` and ``year_min=year_max=2024``.
+    Unrecognized wording remains searchable as text.
+    """
+    text = " ".join(query.split()).strip()
+    filters: dict[str, str | int] = {}
+    match = _SMART_SIDE.search(text)
+    if match:
+        filters["side"] = "aff" if match.group("side").lower() in {"aff", "affirmative"} else "neg"
+        text = text[:match.start()] + " " + text[match.end():]
+
+    match = _SMART_YEAR_RANGE.search(text)
+    if match:
+        first, second = int(match.group("first")), int(match.group("second"))
+        filters["year_min"], filters["year_max"] = min(first, second), max(first, second)
+        text = text[:match.start()] + " " + text[match.end():]
+    else:
+        match = _SMART_YEAR_FROM.search(text)
+        if match:
+            filters["year_min"] = int(match.group("year"))
+            text = text[:match.start()] + " " + text[match.end():]
+        match = _SMART_YEAR_TO.search(text)
+        if match:
+            filters["year_max"] = int(match.group("year"))
+            text = text[:match.start()] + " " + text[match.end():]
+        match = _SMART_YEAR_IN.search(text)
+        if match:
+            year = int(match.group("year"))
+            filters["year_min"] = filters["year_max"] = year
+            text = text[:match.start()] + " " + text[match.end():]
+    text = _SMART_PREFIX.sub("", text)
+    text = _SMART_FILLER.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip(" .,?!;:"), filters
+
+
+def smart_query_variants(query: str, *, limit: int = 5) -> list[str]:
+    """Turn a conversational request into a few focused retrieval queries.
+
+    This is deliberately local and explainable. It strips request framing and
+    produces one synonym-focused variant at a time instead of stuffing every
+    synonym into one query, which would make lexical search overly broad. An
+    optional model layer in the API can add more variants, but it never writes
+    or summarizes evidence.
+    """
+    original = " ".join(query.split()).strip()
+    if not original:
+        return []
+    cleaned = _SMART_PREFIX.sub("", original)
+    cleaned = _SMART_FILLER.sub(" ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .,?!;:")
+    variants: list[str] = []
+    for candidate in (original, cleaned):
+        if candidate and candidate.lower() not in {v.lower() for v in variants}:
+            variants.append(candidate)
+    words = re.findall(r"[\w'-]+", cleaned.lower())
+    for word in words:
+        for synonym in _SMART_SYNONYMS.get(word, ()):
+            if synonym != word:
+                candidate = re.sub(rf"\b{re.escape(word)}\b", synonym, cleaned,
+                                   count=1, flags=re.IGNORECASE)
+                if candidate.lower() not in {v.lower() for v in variants}:
+                    variants.append(candidate)
+                break
+        if len(variants) >= limit:
+            break
+    return variants[:limit]
 
 
 class SearchEngine:
@@ -368,11 +498,60 @@ class SearchEngine:
             "WHERE " + " AND ".join(where), params).fetchall()
         return {r["card_id"] for r in rows}
 
+    @staticmethod
+    def _matched_terms(query: str, row: dict) -> list[str]:
+        haystack = " ".join(str(row.get(key) or "") for key in
+                            ("tag", "read_text", "cite_raw")).lower()
+        terms = []
+        for term in re.findall(r"[\w'-]+", query.lower()):
+            if len(term) >= 3 and term not in terms and re.search(
+                    rf"(?<!\w){re.escape(term)}(?!\w)", haystack):
+                terms.append(term)
+        return terms
+
+    @classmethod
+    def _match_quality(cls, query: str, row: dict,
+                       lexical_rank: int | None,
+                       vector_rank: int | None) -> tuple[str, str]:
+        """Return a human-readable signal class, not a fake probability.
+
+        ``exact`` means query terms occur in the card and lexical retrieval
+        found it; ``hybrid`` means lexical and semantic retrieval agree; and
+        ``semantic`` is discovery-only. The confidence labels describe ranking
+        evidence (high/medium/exploratory), never factual correctness.
+        """
+        exact = bool(cls._matched_terms(query, row))
+        if exact and lexical_rank is not None:
+            match_type = "exact"
+            confidence = "high" if lexical_rank <= 5 else "medium"
+        elif lexical_rank is not None and vector_rank is not None:
+            match_type, confidence = "hybrid", "medium"
+        elif lexical_rank is not None:
+            match_type, confidence = "lexical", "medium"
+        else:
+            match_type, confidence = "semantic", "exploratory"
+        return confidence, match_type
+
+    @classmethod
+    def _match_reasons(cls, query: str, row: dict, lexical_rank: int | None,
+                       vector_rank: int | None) -> list[str]:
+        """Explain the ranking signal without pretending it is a model verdict."""
+        terms = cls._matched_terms(query, row)
+        reasons: list[str] = []
+        if terms:
+            reasons.append("exact: " + ", ".join(terms[:6]))
+        if lexical_rank is not None:
+            reasons.append(f"lexical rank #{lexical_rank}")
+        if vector_rank is not None:
+            reasons.append(f"semantic rank #{vector_rank}")
+        return reasons or ["semantic similarity"]
+
     def search(self, query: str, k: int = 25, *, side: str | None = None,
                author: str | None = None, year_min: int | None = None,
                year_max: int | None = None, block: str | None = None,
                min_read_ratio: float | None = None,
-               source: str | None = None) -> list[Hit]:
+               source: str | None = None,
+               mode: str = "balanced") -> list[Hit]:
         if k <= 0 or not query.strip():
             return []
         self._ensure_current()
@@ -384,8 +563,13 @@ class SearchEngine:
         if allowed == set():
             return []
 
+        if mode not in {"strict", "balanced", "explore"}:
+            raise ValueError(f"unknown search mode: {mode}")
+        semantic_floor = {"strict": 0.15, "balanced": 0.03, "explore": 0.0}[mode]
         lex = self._lexical(query, pool, allowed=allowed)
-        vec = self.vectors.query(query, pool, allowed=allowed)
+        vec = self.vectors.query(
+            query, pool, allowed=allowed, min_similarity=semantic_floor,
+        )
 
         lex_rank = {cid: i + 1 for i, (cid, _) in enumerate(lex)}
         vec_rank = {cid: i + 1 for i, (cid, _) in enumerate(vec)}
@@ -439,10 +623,61 @@ class SearchEngine:
                 source_origin=r.get("source_origin") or "",
                 source_url=r.get("source_url"),
                 lexical_rank=lex_rank.get(cid), vector_rank=vec_rank.get(cid),
+                match_reasons=self._match_reasons(
+                    query, r, lex_rank.get(cid), vec_rank.get(cid),
+                ),
+                confidence=self._match_quality(
+                    query, r, lex_rank.get(cid), vec_rank.get(cid),
+                )[0],
+                match_type=self._match_quality(
+                    query, r, lex_rank.get(cid), vec_rank.get(cid),
+                )[1],
             ))
             if len(hits) >= k:
                 break
         return hits
+
+    def smart_search(self, query: str, k: int = 25, *,
+                     variants: list[str] | None = None,
+                     mode: str = "balanced", **filters) -> tuple[list[Hit], list[str]]:
+        """Search a plain-English request through several transparent queries.
+
+        Results are fused by the number and quality of variants that found them,
+        so a card that matches both the user's wording and its debate vocabulary
+        rises above a one-off synonym hit. The returned variants are shown to the
+        caller; this is a search aid, not an opaque AI answer.
+        """
+        interpreted_query, inferred = parse_smart_request(query)
+        for key, value in inferred.items():
+            if filters.get(key) is None:
+                filters[key] = value
+        queries = variants or smart_query_variants(interpreted_query)
+        if not queries:
+            return [], []
+        merged: dict[str, tuple[Hit, float, list[str]]] = {}
+        for index, candidate in enumerate(queries):
+            for hit in self.search(
+                    candidate, k=max(k * 2, 25), mode=mode, **filters):
+                # Earlier variants preserve the user's wording; later variants
+                # are useful recall expansions but receive slightly less weight.
+                weight = 1.0 / (1.0 + index * 0.35)
+                previous = merged.get(hit.card_id)
+                if previous is None:
+                    merged[hit.card_id] = (hit, hit.score * weight, [candidate])
+                else:
+                    old_hit, score, matched = previous
+                    # The first conversational variant may find a card only
+                    # semantically, while a later cleaned variant can prove an
+                    # exact lexical match. Keep the strongest explanation while
+                    # still accumulating every variant's retrieval score.
+                    strength = {"exploratory": 0, "medium": 1, "high": 2}
+                    best = hit if strength.get(hit.confidence, 0) > strength.get(
+                        old_hit.confidence, 0) else old_hit
+                    merged[hit.card_id] = (best, score + hit.score * weight,
+                                           matched + [candidate])
+        ranked = sorted(merged.values(), key=lambda item: -item[1])[:k]
+        return [replace(hit, score=score, matched_queries=matched)
+                for hit, score, matched in ranked], queries
 
     def covers(self, query: str, *, exclude_card_ids: set[str] | None = None,
                restrict_to: set[str] | None = None,
@@ -492,7 +727,10 @@ class SearchEngine:
         depth = (min(k + len(exclude) + 10, len(allowed))
                  if allowed is not None else k + len(exclude) + 10)
         out: list[tuple[str, float]] = []
-        for cid, score in self.vectors.query(query, k=depth, allowed=allowed):
+        for cid, score in self.vectors.query(
+                query, k=depth, allowed=allowed,
+                include_nonpositive=floor <= 0.0,
+        ):
             if cid in exclude:
                 continue
             if score < floor:

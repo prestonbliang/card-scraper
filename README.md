@@ -117,8 +117,21 @@ python -m cardgraph.cli ingest online https://openev.debatecoaches.org/releases/
     --limit 500 --license "Open Evidence Project terms; verify before redistribution"
 python -m cardgraph.cli search "households pay for transmission" \
     --source openev --side aff
+python -m cardgraph.cli search --smart "Please find cards about household costs"
 python -m cardgraph.cli catalog  # reviewed sources and their access boundaries
 ```
+
+Search also has a **Smart** mode in the web UI and at `/api/smart-search`. It
+locally removes conversational framing and tries a few focused debate synonyms,
+then fuses only cards actually present in your index. It is intentionally not a
+chatbot: no model key is required, no evidence is generated, and the API returns
+the exact variants used so every result remains explainable and citable. Each hit
+also reports whether it came from exact lexical terms, semantic ranking, or both.
+Each result carries a small confidence badge: **High confidence** means exact
+terms were found and lexical retrieval ranked the card near the top; **Strong
+match** means lexical and semantic signals support it; **Explore match** means
+it was found semantically and should be verified against the card before use.
+These are retrieval signals, not truth scores.
 
 The API exposes the same provenance through `GET /api/sources`; `/api/search`
 returns `source_title`, `source_origin`, and `source_url` for each hit.

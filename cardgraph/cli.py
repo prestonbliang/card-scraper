@@ -22,7 +22,7 @@ import sys
 import time
 
 from .graph.relate import build_all
-from .index.search import SearchEngine
+from .index.search import SearchEngine, parse_smart_request
 from .index.store import Store
 from .ingest.base import (CaselistArchiveAdapter, GitRepoAdapter,
                           LocalDirAdapter, OnlineEvidenceAdapter,
@@ -243,11 +243,25 @@ def cmd_search(args) -> int:
     store = Store(args.db)
     engine = SearchEngine(store)
     engine.build()
-    hits = engine.search(
-        args.query, k=args.k, side=args.side, author=args.author,
-        year_min=args.year_min, year_max=args.year_max, block=args.block,
-        min_read_ratio=args.min_read_ratio, source=args.source,
-    )
+    if args.smart:
+        hits, variants = engine.smart_search(
+            args.query, k=args.k, side=args.side, author=args.author,
+            year_min=args.year_min, year_max=args.year_max, block=args.block,
+            min_read_ratio=args.min_read_ratio, source=args.source,
+            mode=args.mode,
+        )
+        interpreted_query, inferred = parse_smart_request(args.query)
+        print("smart query: " + interpreted_query)
+        if inferred:
+            print("smart filters: " + ", ".join(f"{k}={v}" for k, v in inferred.items()))
+        print("smart queries: " + " | ".join(variants))
+    else:
+        hits = engine.search(
+            args.query, k=args.k, side=args.side, author=args.author,
+            year_min=args.year_min, year_max=args.year_max, block=args.block,
+            min_read_ratio=args.min_read_ratio, source=args.source,
+            mode=args.mode,
+        )
     if not hits:
         print("no results")
         return 0
@@ -258,7 +272,8 @@ def cmd_search(args) -> int:
         if h.source_url:
             print(f"   url   : {h.source_url}")
         print(f"   read : {h.read_text[:220]}")
-        print(f"   score: {h.score:.4f}  (lex #{h.lexical_rank}, vec #{h.vector_rank})")
+        print(f"   match: {h.confidence} · {h.match_type}  (lex #{h.lexical_rank}, vec #{h.vector_rank})")
+        print(f"   score: {h.score:.4f}")
     return 0
 
 
@@ -356,6 +371,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--block", help="filter by block or contention name")
     s.add_argument("--source", help="filter by source id, title, origin, or path")
     s.add_argument("--min-read-ratio", type=_ratio, dest="min_read_ratio")
+    s.add_argument("--smart", action="store_true",
+                   help="expand conversational wording into transparent local queries")
+    s.add_argument("--mode", choices=["strict", "balanced", "explore"],
+                   default="balanced", help="retrieval precision mode")
     s.set_defaults(func=cmd_search)
 
     st = sub.add_parser("stats")

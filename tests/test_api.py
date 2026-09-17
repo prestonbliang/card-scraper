@@ -45,6 +45,10 @@ def test_api_search_and_card_preserve_provenance(tmp_path):
         assert hit["source_title"] == "Public release"
         assert hit["source_origin"] == "online"
         assert hit["source_url"].startswith("https://openev")
+        assert any(reason.startswith("exact:") for reason in hit["match_reasons"])
+        assert any("lexical rank" in reason for reason in hit["match_reasons"])
+        assert hit["confidence"] in {"high", "medium", "exploratory"}
+        assert hit["match_type"] in {"exact", "hybrid", "lexical", "semantic"}
 
         detail = client.get(f"/api/card/{hit['card_id']}")
         assert detail.status_code == 200
@@ -53,3 +57,28 @@ def test_api_search_and_card_preserve_provenance(tmp_path):
         catalog = client.get("/api/catalog")
         assert catalog.status_code == 200
         assert any(s["id"] == "debate-central" for s in catalog.json()["sources"])
+
+
+def test_api_smart_search_returns_transparent_variants_and_provenance(tmp_path):
+    with TestClient(_app(tmp_path)) as client:
+        result = client.get("/api/smart-search", params={
+            "q": "Please find cards about household costs",
+        })
+        assert result.status_code == 200
+        payload = result.json()
+        assert payload["interpreted_query"] == "household costs"
+        assert any("household" in variant.lower() for variant in payload["variants"])
+        assert payload["hits"][0]["source_title"] == "Public release"
+        assert payload["hits"][0]["matched_queries"]
+        assert payload["hits"][0]["match_reasons"]
+        assert payload["hits"][0]["confidence"] in {"medium", "exploratory"}
+        assert payload["hits"][0]["match_type"] == "semantic"
+
+        overridden = client.get("/api/smart-search", params={
+            "q": "negative cards about grid", "side": "aff",
+        }).json()
+        assert overridden["interpreted_filters"]["side"] == "aff"
+
+        assert client.get(
+            "/api/smart-search?q=grid&year_min=2027&year_max=2020"
+        ).status_code == 422
