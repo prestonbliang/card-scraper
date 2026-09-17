@@ -134,7 +134,9 @@ it was found semantically and should be verified against the card before use.
 These are retrieval signals, not truth scores. Search URLs are shareable: the
 query, Smart toggle, precision mode, side/source/block filters, and current view
 are encoded in the address bar. Use **Copy link** to send a teammate the exact
-search state; browser Back/Forward restores it without losing the result.
+search state; browser Back/Forward restores it without losing the result. Cards
+and contention/block details have their own **Copy link** button too, so a
+shared URL can open the exact evidence or argument node directly.
 
 The API exposes the same provenance through `GET /api/sources`; `/api/search`
 returns `source_title`, `source_origin`, and `source_url` for each hit.

@@ -52,6 +52,7 @@ header{
 .clearbtn:hover{color:var(--ink);border-color:var(--accent)}
 .copybtn{border:1px solid var(--line);background:var(--panel);color:var(--muted);border-radius:7px;padding:8px 10px;font-size:12px;white-space:nowrap}
 .copybtn:hover{color:var(--accent);border-color:var(--accent)}
+.detail-share{margin:8px 0 2px}
 .filter-clear{border:0;background:transparent;color:var(--muted);padding:6px 4px;font-size:12px;text-decoration:underline;text-underline-offset:2px}
 .filter-clear:hover{color:var(--accent)}
 input[type=search],select{
@@ -371,18 +372,8 @@ function cardEl(c, opts = {}){
   return n;
 }
 
-/* ---------- search ---------- */
-$("#side").addEventListener("change", () => { updateFilterSummary(); doSearch({pushUrl: true}); });
-$("#source").addEventListener("input", updateFilterSummary);
-$("#block").addEventListener("input", updateFilterSummary);
-$("#smartSearch").addEventListener("change", () => {
-  if ($("#q").value.trim()) doSearch({pushUrl: true});
-});
-$("#searchMode").addEventListener("change", () => doSearch({pushUrl: true}));
-$("#searchBtn").addEventListener("click", () => doSearch({pushUrl: true}));
-$("#copyLink").addEventListener("click", async () => {
-  syncUrl();
-  const button = $("#copyLink");
+async function copyUrlToClipboard(button, {sync = true} = {}){
+  if (sync) syncUrl();
   try {
     if (navigator.clipboard && window.isSecureContext) {
       await navigator.clipboard.writeText(location.href);
@@ -399,7 +390,29 @@ $("#copyLink").addEventListener("click", async () => {
     button.textContent = "Link ready";
   }
   setTimeout(() => { button.textContent = "Copy link"; }, 1400);
+}
+
+function detailShare(kind, id){
+  const button = el("button", "copybtn detail-share", "Copy link");
+  button.type = "button";
+  button.title = `Copy a link to this ${kind}`;
+  button.onclick = () => {
+    syncUrl({[kind]: id});
+    copyUrlToClipboard(button, {sync: false});
+  };
+  return button;
+}
+
+/* ---------- search ---------- */
+$("#side").addEventListener("change", () => { updateFilterSummary(); doSearch({pushUrl: true}); });
+$("#source").addEventListener("input", updateFilterSummary);
+$("#block").addEventListener("input", updateFilterSummary);
+$("#smartSearch").addEventListener("change", () => {
+  if ($("#q").value.trim()) doSearch({pushUrl: true});
 });
+$("#searchMode").addEventListener("change", () => doSearch({pushUrl: true}));
+$("#searchBtn").addEventListener("click", () => doSearch({pushUrl: true}));
+$("#copyLink").addEventListener("click", () => copyUrlToClipboard($("#copyLink")));
 $("#clearSearch").addEventListener("click", () => {
   $("#q").value = "";
   syncUrl({pushUrl: true});
@@ -432,7 +445,7 @@ function updateFilterSummary(){
   $("#filterSummary").textContent = count ? `Filters (${count} active)` : "Filters";
 }
 
-function syncUrl({pushUrl = false, view = MODE} = {}){
+function syncUrl({pushUrl = false, view = MODE, card = null, node = null} = {}){
   const params = new URLSearchParams();
   const q = $("#q").value.trim();
   if (q) params.set("q", q);
@@ -442,6 +455,8 @@ function syncUrl({pushUrl = false, view = MODE} = {}){
   if ($("#source").value.trim()) params.set("source", $("#source").value.trim());
   if ($("#block").value.trim()) params.set("block", $("#block").value.trim());
   if (view !== "search") params.set("view", view);
+  if (card) params.set("card", card);
+  if (node) params.set("node", node);
   const next = `${location.pathname}${params.toString() ? "?" + params : ""}`;
   const method = pushUrl ? "pushState" : "replaceState";
   history[method]({search: q, view}, "", next);
@@ -458,9 +473,12 @@ function restoreUrlState(){
   $("#source").value = params.get("source") || "";
   $("#block").value = params.get("block") || "";
   updateFilterSummary();
-  const view = ["analysis", "sources"].includes(params.get("view"))
-    ? params.get("view") : "search";
+  const detailView = params.get("card") || params.get("node");
+  const view = detailView ? "search" : (["analysis", "sources"].includes(params.get("view"))
+    ? params.get("view") : "search");
   setMode(view, {updateUrl: false});
+  if (params.get("card")) showCard(params.get("card"), {updateUrl: false});
+  else if (params.get("node")) showNode(params.get("node"), {updateUrl: false});
 }
 
 window.addEventListener("popstate", () => restoreUrlState());
@@ -559,8 +577,9 @@ async function loadTree(parent, container, depth, opts = {}){
   }
 }
 
-async function showNode(id){
+async function showNode(id, {updateUrl = true} = {}){
   const request = ++viewRequest;
+  if (updateUrl) syncUrl({pushUrl: true, node: id, view: "search"});
   const c = $("#content");
   c.innerHTML = '<div class="spin">loading…</div>';
   try {
@@ -568,6 +587,7 @@ async function showNode(id){
     if (request !== viewRequest) return;
     c.innerHTML = "";
   c.append(el("div", "crumb", (r.node.path.length ? r.node.path.join("  ›  ") : r.node.title)));
+  c.append(detailShare("node", id));
 
   const ans = (r.edges.outgoing || []).filter(e => e.kind === "answers");
   const answered = (r.edges.incoming || []).filter(e => e.kind === "answers");
@@ -603,8 +623,9 @@ async function showNode(id){
   }
 }
 
-async function showCard(id){
+async function showCard(id, {updateUrl = true} = {}){
   const request = ++viewRequest;
+  if (updateUrl) syncUrl({pushUrl: true, card: id, view: "search"});
   const c = $("#content");
   c.innerHTML = '<div class="spin">loading…</div>';
   try {
@@ -612,6 +633,7 @@ async function showCard(id){
     if (request !== viewRequest) return;
     c.innerHTML = "";
   c.append(el("div", "crumb", d.path.length ? d.path.join("  ›  ") : d.source_id));
+  c.append(detailShare("card", id));
 
   const box = el("div", "card detail");
   box.append(el("h3", null, d.tag));
