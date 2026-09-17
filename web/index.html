@@ -50,6 +50,8 @@ header{
 .filter-block{min-width:150px!important}
 .clearbtn{border:1px solid var(--line);background:var(--panel);color:var(--muted);border-radius:7px;padding:7px 9px;font-size:16px;line-height:1}
 .clearbtn:hover{color:var(--ink);border-color:var(--accent)}
+.copybtn{border:1px solid var(--line);background:var(--panel);color:var(--muted);border-radius:7px;padding:8px 10px;font-size:12px;white-space:nowrap}
+.copybtn:hover{color:var(--accent);border-color:var(--accent)}
 .filter-clear{border:0;background:transparent;color:var(--muted);padding:6px 4px;font-size:12px;text-decoration:underline;text-underline-offset:2px}
 .filter-clear:hover{color:var(--accent)}
 input[type=search],select{
@@ -222,6 +224,7 @@ h4.sec{font-size:11px;text-transform:uppercase;letter-spacing:.09em;
       </label>
       <button class="clearbtn" id="clearSearch" type="button" aria-label="Clear search">×</button>
       <button class="searchbtn" id="searchBtn">Search</button>
+      <button class="copybtn" id="copyLink" type="button" title="Copy a link to this search">Copy link</button>
     </div>
     <div class="search-help">
       <span>Try</span>
@@ -369,16 +372,37 @@ function cardEl(c, opts = {}){
 }
 
 /* ---------- search ---------- */
-$("#side").addEventListener("change", () => { updateFilterSummary(); doSearch(); });
+$("#side").addEventListener("change", () => { updateFilterSummary(); doSearch({pushUrl: true}); });
 $("#source").addEventListener("input", updateFilterSummary);
 $("#block").addEventListener("input", updateFilterSummary);
 $("#smartSearch").addEventListener("change", () => {
-  if ($("#q").value.trim()) doSearch();
+  if ($("#q").value.trim()) doSearch({pushUrl: true});
 });
-$("#searchMode").addEventListener("change", doSearch);
-$("#searchBtn").addEventListener("click", doSearch);
+$("#searchMode").addEventListener("change", () => doSearch({pushUrl: true}));
+$("#searchBtn").addEventListener("click", () => doSearch({pushUrl: true}));
+$("#copyLink").addEventListener("click", async () => {
+  syncUrl();
+  const button = $("#copyLink");
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(location.href);
+    } else {
+      const field = document.createElement("textarea");
+      field.value = location.href; field.setAttribute("readonly", "");
+      field.style.position = "fixed"; field.style.opacity = "0";
+      document.body.append(field); field.select();
+      if (!document.execCommand("copy")) throw new Error("copy unavailable");
+      field.remove();
+    }
+    button.textContent = "Copied!";
+  } catch (_) {
+    button.textContent = "Link ready";
+  }
+  setTimeout(() => { button.textContent = "Copy link"; }, 1400);
+});
 $("#clearSearch").addEventListener("click", () => {
   $("#q").value = "";
+  syncUrl({pushUrl: true});
   renderWelcome();
   $("#q").focus();
 });
@@ -387,19 +411,20 @@ $("#clearFilters").addEventListener("click", () => {
   $("#source").value = "";
   $("#block").value = "";
   updateFilterSummary();
-  if ($("#q").value.trim()) doSearch();
+  if ($("#q").value.trim()) doSearch({pushUrl: true});
+  else syncUrl({pushUrl: true});
 });
 document.querySelectorAll(".query-example").forEach(button => {
   button.addEventListener("click", () => {
     $("#q").value = button.dataset.query || "";
-    doSearch();
+    doSearch({pushUrl: true});
     $("#q").focus();
   });
 });
 
-$("#q").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
-$("#source").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
-$("#block").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
+$("#q").addEventListener("keydown", e => { if (e.key === "Enter") doSearch({pushUrl: true}); });
+$("#source").addEventListener("keydown", e => { if (e.key === "Enter") doSearch({pushUrl: true}); });
+$("#block").addEventListener("keydown", e => { if (e.key === "Enter") doSearch({pushUrl: true}); });
 
 function updateFilterSummary(){
   const count = [$("#side").value, $("#source").value.trim(), $("#block").value.trim()]
@@ -407,10 +432,47 @@ function updateFilterSummary(){
   $("#filterSummary").textContent = count ? `Filters (${count} active)` : "Filters";
 }
 
-async function doSearch(){
+function syncUrl({pushUrl = false, view = MODE} = {}){
+  const params = new URLSearchParams();
+  const q = $("#q").value.trim();
+  if (q) params.set("q", q);
+  if (!$("#smartSearch").checked) params.set("smart", "0");
+  if ($("#searchMode").value !== "balanced") params.set("mode", $("#searchMode").value);
+  if ($("#side").value) params.set("side", $("#side").value);
+  if ($("#source").value.trim()) params.set("source", $("#source").value.trim());
+  if ($("#block").value.trim()) params.set("block", $("#block").value.trim());
+  if (view !== "search") params.set("view", view);
+  const next = `${location.pathname}${params.toString() ? "?" + params : ""}`;
+  const method = pushUrl ? "pushState" : "replaceState";
+  history[method]({search: q, view}, "", next);
+}
+
+function restoreUrlState(){
+  const params = new URLSearchParams(location.search);
+  $("#q").value = params.get("q") || "";
+  $("#smartSearch").checked = params.get("smart") !== "0";
+  $("#searchMode").value = ["strict", "balanced", "explore"].includes(params.get("mode"))
+    ? params.get("mode") : "balanced";
+  $("#side").value = ["aff", "neg", "unknown"].includes(params.get("side"))
+    ? params.get("side") : "";
+  $("#source").value = params.get("source") || "";
+  $("#block").value = params.get("block") || "";
+  updateFilterSummary();
+  const view = ["analysis", "sources"].includes(params.get("view"))
+    ? params.get("view") : "search";
+  setMode(view, {updateUrl: false});
+}
+
+window.addEventListener("popstate", () => restoreUrlState());
+
+async function doSearch({pushUrl = false} = {}){
   const request = ++viewRequest;
   const q = $("#q").value.trim();
-  if (!q){ renderWelcome(); return; }
+  if (!q){
+    if (pushUrl) syncUrl({pushUrl: true});
+    renderWelcome(); return;
+  }
+  syncUrl({pushUrl});
   const side = $("#side").value;
   const source = $("#source").value.trim();
   const block = $("#block").value.trim();
@@ -818,7 +880,7 @@ async function showAnalysis(){
 
 let MODE = "search";
 let APP_STATS = null;
-function setMode(m){
+function setMode(m, {updateUrl = true} = {}){
   MODE = m;
   $("#mSearch").setAttribute("aria-pressed", String(m === "search"));
   $("#mAnalysis").setAttribute("aria-pressed", String(m === "analysis"));
@@ -827,6 +889,7 @@ function setMode(m){
   document.body.classList.toggle("analysis", m === "analysis");
   document.querySelector("main").style.gridTemplateColumns =
     m === "search" ? "300px 1fr" : "1fr";
+  if (updateUrl) syncUrl({view: m});
   if (m === "analysis") showAnalysis();
   else if (m === "sources") showCatalog();
   else if ($("#q").value.trim()) doSearch();
@@ -877,7 +940,7 @@ function renderWelcome(){
   $("#mSearch").onclick = () => setMode("search");
   $("#mAnalysis").onclick = () => setMode("analysis");
   $("#mSources").onclick = () => setMode("sources");
-  renderWelcome();
+  restoreUrlState();
 })();
 </script>
 </body>
