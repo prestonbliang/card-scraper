@@ -128,7 +128,9 @@ chatbot: no model key is required, no evidence is generated, and the API returns
 the exact variants used so every result remains explainable and citable. Each hit
 also reports whether it came from exact lexical terms, semantic ranking, or both.
 Each result carries a small confidence badge: **High confidence** means exact
-terms were found and lexical retrieval ranked the card near the top; **Strong
+terms were found and lexical retrieval ranked the card near the top. Matching
+terms are highlighted in the read text so a debater can scan why a result
+matched before opening it. **Strong
 match** means lexical and semantic signals support it; **Explore match** means
 it was found semantically and should be verified against the card before use.
 These are retrieval signals, not truth scores. Search URLs are shareable: the

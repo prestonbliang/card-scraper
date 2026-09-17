@@ -38,6 +38,8 @@ def test_search_state_is_shareable_and_restorable():
         'function boardCardEl(card)',
         'function reorderPinned(draggedId, targetId)',
         'Private note for this card',
+        'function highlightedRead(text, reasons)',
+        'el("mark", "search-hit", part)',
     ):
         assert marker in html
 

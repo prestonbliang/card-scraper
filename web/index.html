@@ -139,6 +139,7 @@ body.analysis #content{max-width:1180px}
 .read{font-family:var(--serif);font-size:15.5px;line-height:1.6;
       background:var(--read);padding:2px 0;box-decoration-break:clone}
 .readbox{margin:8px 0 0}
+.search-hit{background:var(--emph);color:var(--ink);padding:0 2px;border-radius:2px}
 .meta{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center}
 .pill{font-size:11px;font-family:var(--mono);padding:2px 8px;border-radius:99px;
       border:1px solid var(--line);color:var(--muted);white-space:nowrap}
@@ -402,6 +403,20 @@ function pinButton(c){
   return button;
 }
 
+function highlightedRead(text, reasons){
+  const terms = (reasons || []).filter(reason => reason.startsWith("exact:"))
+    .flatMap(reason => reason.slice(6).split(",").map(term => term.trim()))
+    .filter((term, index, all) => term.length >= 2 && all.indexOf(term) === index);
+  const root = el("span", "read");
+  if (!terms.length){ root.textContent = text || ""; return root; }
+  const pattern = new RegExp(`(${terms.map(term => term.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")).join("|")})`, "gi");
+  text.split(pattern).forEach(part => {
+    if (terms.some(term => part.toLowerCase() === term.toLowerCase())) root.append(el("mark", "search-hit", part));
+    else root.append(document.createTextNode(part));
+  });
+  return root;
+}
+
 function cardEl(c, opts = {}){
   const n = el("div", "card");
   const title = el("div", "card-title-row");
@@ -423,7 +438,7 @@ function cardEl(c, opts = {}){
   }
   if (c.read_text){
     const rb = el("div", "readbox");
-    rb.append(el("span", "read", c.read_text));
+    rb.append(highlightedRead(c.read_text, c.match_reasons));
     n.append(rb);
   }
   const m = el("div", "meta");
