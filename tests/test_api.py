@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import time
+from datetime import datetime, timedelta, timezone
+
 from fastapi.testclient import TestClient
 
 from cardgraph.api.main import create_app
 from cardgraph.index.store import Store
-from cardgraph.models import Card, Cite, Source
+from cardgraph.ingest.base import Acquired
+from cardgraph.models import Card, Cite, NodeKind, OutlineNode, Source
 
 
 def _app(tmp_path):
@@ -31,10 +35,154 @@ def _app(tmp_path):
 
 def test_api_validates_search_inputs_and_year_ranges(tmp_path):
     with TestClient(_app(tmp_path)) as client:
+        response = client.post("/api/ingest", json={"url": "https://example.net/cases.zip"})
+        assert response.status_code == 202
+        job_id = response.json()["job_id"]
+        for _ in range(20):
+            status = client.get(f"/api/ingest/{job_id}").json()
+            if status["state"] == "failed":
+                break
+            time.sleep(0.01)
+        assert status["state"] == "failed"
+        assert "allowlist" in status["error"]
+        assert client.post("/api/ingest", json={"url": "https://openev.debatecoaches.org/", "limit": 0}).status_code == 422
         assert client.get("/api/search?q=grid&k=0").status_code == 422
         assert client.get("/api/search?q=grid&side=maybe").status_code == 422
         assert client.get("/api/search?q=grid&year_min=2027&year_max=2020").status_code == 422
         assert client.get("/api/tree?limit=0").status_code == 422
+
+    with TestClient(_app(tmp_path)) as restarted:
+        persisted = restarted.get(f"/api/ingest/{job_id}")
+        assert persisted.status_code == 200
+        assert persisted.json()["state"] == "failed"
+
+
+def test_browser_ingest_uses_the_same_store_and_returns_counts(tmp_path, monkeypatch):
+    import cardgraph.api.main as api_main
+
+    source = Source(
+        source_id="public-import", path=str(tmp_path / "public.docx"),
+        title="Public import", origin="online", license="fixture terms",
+        url="https://openev.debatecoaches.org/public.docx",
+    )
+    card = Card(
+        tag="Imported household costs",
+        cite=Cite(raw="Example 2026", author="Example", year=2026),
+        body="Imported household costs. " * 8,
+        read_text="Imported household costs.", source_id=source.source_id,
+        source_path=source.path, ordinal=0,
+    )
+
+    class FakeAdapter:
+        def __init__(self, **_kwargs):
+            pass
+
+        def acquire(self, limit=None):
+            assert limit == 25
+            return [Acquired(path=source.path, source=source)]
+
+    monkeypatch.setattr(api_main, "OnlineEvidenceAdapter", FakeAdapter)
+    monkeypatch.setattr(
+        api_main, "parse_any",
+        lambda path, source_id: ([card], OutlineNode(title="Public", kind=NodeKind.POCKET, source_id=source_id), object()),
+    )
+    with TestClient(_app(tmp_path)) as client:
+        response = client.post("/api/ingest", json={"url": source.url})
+        assert response.status_code == 202
+        job_id = response.json()["job_id"]
+        for _ in range(50):
+            payload = client.get(f"/api/ingest/{job_id}").json()
+            if payload["state"] == "completed":
+                break
+            time.sleep(0.01)
+        assert payload["state"] == "completed"
+        assert payload["imported"] == 1
+        assert payload["cards_added"] == 1
+        assert payload["stats"]["cards"] == 2
+
+        refreshed = Card(
+            tag="Imported transmission burden",
+            cite=Cite(raw="Example 2027", author="Example", year=2027),
+            body="Imported transmission burden. " * 8,
+            read_text="Imported transmission burden.", source_id=source.source_id,
+            source_path=source.path, ordinal=0,
+        )
+        monkeypatch.setattr(
+            api_main, "parse_any",
+            lambda path, source_id: ([refreshed], OutlineNode(
+                title="Public", kind=NodeKind.POCKET, source_id=source_id), object()),
+        )
+        refresh = client.post("/api/sources/public-import/refresh")
+        assert refresh.status_code == 202
+        refresh_id = refresh.json()["job_id"]
+        for _ in range(50):
+            refresh_status = client.get(f"/api/ingest/{refresh_id}").json()
+            if refresh_status["state"] == "completed":
+                break
+            time.sleep(0.01)
+        assert refresh_status["state"] == "completed"
+        assert client.get("/api/search?q=transmission+burden").json()["count"] == 1
+        managed = {item["source_id"]: item for item in client.get("/api/sources").json()["sources"]}
+        assert managed["public-import"]["card_count"] == 1
+
+
+def test_source_management_removes_only_that_source_and_lists_job_history(tmp_path):
+    with TestClient(_app(tmp_path)) as client:
+        sources = client.get("/api/sources").json()["sources"]
+        assert sources[0]["source_id"] == "public"
+        history = client.get("/api/ingest").json()
+        assert history["jobs"] == []
+        removed = client.delete("/api/sources/public")
+        assert removed.status_code == 200
+        assert removed.json()["stats"]["cards"] == 0
+        assert client.delete("/api/sources/public").status_code == 404
+
+
+def test_source_health_marks_stale_and_failed_refresh_preserves_cards(tmp_path, monkeypatch):
+    import cardgraph.api.main as api_main
+
+    db = tmp_path / "health.db"
+    seed = Store(str(db))
+    old = (datetime.now(timezone.utc) - timedelta(days=45)).isoformat(timespec="seconds")
+    seed.add_source(Source(
+        source_id="stale", path="/corpus/stale.docx", title="Stale release",
+        origin="online", license="fixture", fetched_at=old,
+        url="https://openev.debatecoaches.org/stale.docx", card_count=1,
+    ))
+    seed.add_cards([Card(
+        tag="Known good card", cite=Cite(raw="Example 2026"),
+        body="Known good card. " * 8, read_text="Known good card.",
+        source_id="stale", source_path="/corpus/stale.docx", ordinal=0,
+    )])
+    seed.close()
+
+    class BrokenAdapter:
+        def __init__(self, **_kwargs):
+            pass
+
+        def acquire(self, limit=None):
+            return [Acquired(path=str(tmp_path / "stale.docx"), source=Source(
+                source_id="stale", path=str(tmp_path / "stale.docx"),
+                title="Stale release", origin="online", license="fixture",
+                fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                url="https://openev.debatecoaches.org/stale.docx"))]
+
+    monkeypatch.setattr(api_main, "OnlineEvidenceAdapter", BrokenAdapter)
+    monkeypatch.setattr(api_main, "parse_any", lambda *_args: (_ for _ in ()).throw(RuntimeError("bad document")))
+    with TestClient(api_main.create_app(str(db))) as client:
+        listed = client.get("/api/sources").json()["sources"][0]
+        assert listed["health"]["state"] == "stale"
+        queued = client.post("/api/sources/stale/refresh")
+        assert queued.status_code == 202
+        for _ in range(50):
+            status = client.get(f"/api/ingest/{queued.json()['job_id']}").json()
+            if status["state"] == "failed":
+                break
+            time.sleep(0.01)
+        assert status["state"] == "failed"
+        health = client.get("/api/sources").json()["sources"][0]["health"]
+        assert health["state"] == "refresh-failed"
+        assert client.get("/api/search?q=known+good").json()["count"] == 1
 
 
 def test_api_search_and_card_preserve_provenance(tmp_path):

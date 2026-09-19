@@ -42,6 +42,22 @@ def test_search_state_is_shareable_and_restorable():
         'el("mark", "search-hit", part)',
         'evidence-badge',
         'Traceable evidence',
+        'id="mSources"',
+        'Add a public release',
+        'api("/api/ingest"',
+        'Import source',
+        'const cancel = el',
+        '/api/ingest/${jobId}',
+        'job.total',
+        'setInterval(() => poll()',
+        'Your indexed sources',
+        'function importedSourceEl',
+        '/api/sources/${encodeURIComponent(s.source_id)}/refresh',
+        '/api/sources/${encodeURIComponent(s.source_id)}',
+        'Recent imports',
+        'source_freshness',
+        'Refresh all stale sources',
+        '/api/sources/refresh-stale',
     ):
         assert marker in html
 

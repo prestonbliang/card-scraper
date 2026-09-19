@@ -1,6 +1,8 @@
 # Card Scraper
 
-Search, browse and **stress-test** debate evidence.
+Search, browse and **stress-test** debate evidence. The current public beta is
+tracked in [CHANGELOG.md](CHANGELOG.md) and guarded by GitHub Actions across
+Python 3.10–3.12.
 
 Card Scraper (the Python package remains `cardgraph` for compatibility) parses Verbatim-style `.docx` into structured cards, indexes them on the text
 that actually gets read aloud, links `AT:` blocks to what they answer across
@@ -164,7 +166,20 @@ upload your evidence anywhere.
 
 
 The API exposes the same provenance through `GET /api/sources`; `/api/search`
-returns `source_title`, `source_origin`, and `source_url` for each hit.
+returns `source_title`, `source_origin`, and `source_url` for each hit. The
+browser's **Sources** view can also import a small public release directly.
+The import runs as a background job with per-file progress and cancellation;
+it uses the same allowlist, robots checks, parsers, and provenance recording as
+the CLI, with a 25-file browser cap. Import jobs and source records persist in
+SQLite, so reloads do not erase history. The Sources workspace can refresh a
+public source or remove its cards and graph rows without touching other sources.
+Refresh parses the replacement first and swaps it in only after a successful
+parse, so a failed refresh preserves the last known-good evidence. Sources also
+report **Fresh**, **Stale**, or **Refresh failed** health: online releases use a
+30-day freshness window, while dataset-style releases use 90 days. A failed
+refresh is never silently treated as current, and the Sources workspace can
+queue every stale public source at once.
+Use the CLI for large or resumable imports.
 
 ```bash
 python -m cardgraph.cli ingest-opendebate \

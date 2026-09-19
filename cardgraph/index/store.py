@@ -31,8 +31,28 @@ CREATE TABLE IF NOT EXISTS sources (
     license     TEXT,
     fetched_at  TEXT,
     url         TEXT,
-    card_count  INTEGER DEFAULT 0
+    card_count  INTEGER DEFAULT 0,
+    last_refresh_failed_at TEXT,
+    last_refresh_error TEXT
 );
+
+CREATE TABLE IF NOT EXISTS ingest_jobs (
+    job_id      TEXT PRIMARY KEY,
+    url         TEXT NOT NULL,
+    license     TEXT NOT NULL,
+    state       TEXT NOT NULL,
+    processed   INTEGER DEFAULT 0,
+    total       INTEGER,
+    imported    INTEGER DEFAULT 0,
+    cards_added INTEGER DEFAULT 0,
+    skipped     INTEGER DEFAULT 0,
+    failed      INTEGER DEFAULT 0,
+    error       TEXT,
+    details_json TEXT NOT NULL DEFAULT '[]',
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ingest_jobs_updated ON ingest_jobs(updated_at);
 
 CREATE TABLE IF NOT EXISTS cards (
     card_id        TEXT PRIMARY KEY,
@@ -109,6 +129,18 @@ class Store:
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        # Existing databases predate source-health metadata. SQLite's schema
+        # script is intentionally idempotent, so migrate those two columns
+        # explicitly without asking users to rebuild their corpus.
+        for column, definition in ((
+            "last_refresh_failed_at", "TEXT"),
+            ("last_refresh_error", "TEXT"),
+        ):
+            try:
+                self.conn.execute(f"ALTER TABLE sources ADD COLUMN {column} {definition}")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
         self.conn.commit()
 
     @contextmanager
@@ -131,6 +163,52 @@ class Store:
                 (src.source_id, src.path, src.title, src.origin, src.license,
                  src.fetched_at, src.url, src.card_count),
             )
+
+    def save_ingest_job(self, job: dict) -> None:
+        """Persist browser import progress so reloads and restarts are safe."""
+        import time
+        now = time.time()
+        with self.tx() as c:
+            c.execute(
+                """INSERT INTO ingest_jobs
+                   (job_id, url, license, state, processed, total, imported,
+                    cards_added, skipped, failed, error, details_json,
+                    created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(job_id) DO UPDATE SET
+                    state=excluded.state, processed=excluded.processed,
+                    total=excluded.total, imported=excluded.imported,
+                    cards_added=excluded.cards_added, skipped=excluded.skipped,
+                    failed=excluded.failed, error=excluded.error,
+                    details_json=excluded.details_json, updated_at=excluded.updated_at""",
+                (job["job_id"], job["url"], job.get("license", ""),
+                 job["state"], job.get("processed", 0), job.get("total"),
+                 job.get("imported", 0), job.get("cards_added", 0),
+                 job.get("skipped", 0), job.get("failed", 0), job.get("error"),
+                 json.dumps(job.get("details", [])[:5]),
+                 job.get("created_at", now), now),
+            )
+
+    def ingest_job(self, job_id: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM ingest_jobs WHERE job_id=?", (job_id,)
+        ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["details"] = json.loads(result.pop("details_json") or "[]")
+        return result
+
+    def ingest_jobs(self, limit: int = 50) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM ingest_jobs ORDER BY updated_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            item["details"] = json.loads(item.pop("details_json") or "[]")
+            out.append(item)
+        return out
 
     def remove_source(self, source_id: str) -> None:
         """Remove one imported file and its derived search/graph rows.
@@ -185,6 +263,23 @@ class Store:
                     card_ids,
                 )
             c.execute("DELETE FROM sources WHERE source_id=?", (source_id,))
+
+    def mark_source_refresh_failed(self, source_id: str, error: str) -> None:
+        """Remember a failed refresh while keeping the last-known-good cards."""
+        import datetime
+        failed_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+        with self.tx() as c:
+            c.execute(
+                "UPDATE sources SET last_refresh_failed_at=?, last_refresh_error=? "
+                "WHERE source_id=?", (failed_at, error[:1000], source_id),
+            )
+
+    def clear_source_refresh_failure(self, source_id: str) -> None:
+        with self.tx() as c:
+            c.execute(
+                "UPDATE sources SET last_refresh_failed_at=NULL, last_refresh_error=NULL "
+                "WHERE source_id=?", (source_id,),
+            )
 
     def card_revision(self) -> tuple[int, int]:
         """Return a cheap revision marker for the FTS-backed card corpus.

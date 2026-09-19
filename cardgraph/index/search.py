@@ -29,6 +29,7 @@ import os
 import pickle
 import re
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 
 import numpy as np
 
@@ -62,6 +63,9 @@ class Hit:
     disclosed_only: bool = False
     warrant_flags: list[str] | None = None
     evidence_status: str = "needs-review"
+    source_freshness: str = "unknown"
+    source_age_days: int | None = None
+    source_refresh_error: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -81,6 +85,9 @@ class Hit:
             "disclosed_only": self.disclosed_only,
             "warrant_flags": self.warrant_flags or [],
             "evidence_status": self.evidence_status,
+            "source_freshness": self.source_freshness,
+            "source_age_days": self.source_age_days,
+            "source_refresh_error": self.source_refresh_error,
         }
 
 
@@ -619,9 +626,11 @@ class SearchEngine:
 
         ids = sorted(fused, key=lambda c: -fused[c])
         placeholders = ",".join("?" * len(ids))
-        rows = {r["card_id"]: dict(r) for r in self.store.conn.execute(
-            f"SELECT c.*, s.title AS source_title, s.origin AS source_origin, "
-            f"s.url AS source_url FROM cards c "
+        rows = {r["card_id"]: dict(r) for r in self.store.conn.execute(                f"SELECT c.*, s.title AS source_title, s.origin AS source_origin, "
+                f"s.url AS source_url, s.fetched_at AS source_fetched_at, "
+                f"s.last_refresh_failed_at AS source_refresh_failed_at, "
+                f"s.last_refresh_error AS source_refresh_error FROM cards c "
+
             f"LEFT JOIN sources s ON s.source_id = c.source_id "
             f"WHERE c.card_id IN ({placeholders})", ids)}
 
@@ -648,6 +657,7 @@ class SearchEngine:
                     + (r.get("source_origin") or "") + " "
                     + (r.get("source_path") or "")).lower():
                 continue
+            freshness, age_days = self._source_freshness(r)
             hits.append(Hit(
                 card_id=cid, score=fused[cid], tag=r["tag"],
                 read_text=r["read_text"] or "", cite_raw=r["cite_raw"] or "",
@@ -671,10 +681,29 @@ class SearchEngine:
                 disclosed_only=bool(r.get("disclosed_only")),
                 warrant_flags=self._warrant_flags(r),
                 evidence_status=self._evidence_status(r),
+                source_freshness=freshness,
+                source_age_days=age_days,
+                source_refresh_error=r.get("source_refresh_error"),
             ))
             if len(hits) >= k:
                 break
         return hits
+
+    @staticmethod
+    def _source_freshness(row: dict) -> tuple[str, int | None]:
+        """Classify source age conservatively; a failed refresh wins over age."""
+        if row.get("source_refresh_failed_at"):
+            return "refresh-failed", None
+        fetched = row.get("source_fetched_at")
+        if not fetched:
+            return "unknown", None
+        try:
+            stamp = datetime.fromisoformat(fetched.replace("Z", "+00:00"))
+            age = max(0, (datetime.now(timezone.utc) - stamp).days)
+        except (TypeError, ValueError):
+            return "unknown", None
+        threshold = 90 if row.get("source_origin") in {"opendebateevidence", "dataset"} else 30
+        return ("stale" if age >= threshold else "fresh"), age
 
     def smart_search(self, query: str, k: int = 25, *,
                      variants: list[str] | None = None,

@@ -155,6 +155,10 @@ body.analysis #content{max-width:1180px}
 .evidence-badge.traceable{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
 .evidence-badge.attributed{color:var(--warn);border-color:var(--warn);background:var(--warn-bg)}
 .evidence-badge.needs-review{color:var(--neg);border-color:var(--neg);background:color-mix(in srgb,var(--neg) 10%,transparent)}
+.freshness-badge{font-size:10px;font-family:var(--mono);padding:2px 7px;border-radius:99px;white-space:nowrap;border:1px solid}
+.freshness-badge.fresh{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
+.freshness-badge.stale,.freshness-badge.refresh-failed{color:var(--warn);border-color:var(--warn);background:var(--warn-bg)}
+.freshness-badge.unknown{color:var(--muted);border-color:var(--line);background:var(--panel-alt)}
 
 .detail .body{font-family:var(--serif);font-size:15px;line-height:1.65;
               color:var(--muted);margin-top:10px}
@@ -246,6 +250,17 @@ h4.sec{font-size:11px;text-transform:uppercase;letter-spacing:.09em;
 .source-card.gated{border-color:var(--warn)}
 .source-card.gated .source-access{color:var(--warn)}
 .source-access{font-family:var(--mono);font-size:10px;text-transform:uppercase;color:var(--accent);letter-spacing:.06em}
+.ingest-panel{background:var(--accent-soft);border:1px solid var(--accent);border-radius:10px;padding:14px;margin:14px 0 18px}
+.ingest-panel h3{margin:0 0 5px;font-size:14px}
+.ingest-panel p{margin:0 0 10px;color:var(--muted);font-size:12px}
+.ingest-form{display:flex;gap:7px;flex-wrap:wrap}
+.ingest-form input{flex:1;min-width:240px}
+.ingest-status{margin-top:9px;font-size:12px;color:var(--muted)}
+.source-actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:10px}
+.source-health{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:7px}
+.import-history{margin:18px 0}.import-history h3{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 8px}
+.import-job{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;border-bottom:1px solid var(--line);padding:8px 0;font-size:12px}
+.import-job .state{font-family:var(--mono);font-size:10px;text-transform:uppercase;color:var(--accent)}
 </style>
 </head>
 <body>
@@ -449,6 +464,17 @@ function cardEl(c, opts = {}){
   if (c.side && c.side !== "unknown") m.append(el("span", "pill " + c.side, c.side));
   if (c.block) m.append(el("span", "pill", c.block));
   (c.warrant_flags || []).forEach(f => m.append(el("span", "pill flag", f.replace(/_/g," "))));
+  if (c.source_freshness){
+    const labels = {fresh: "Fresh source", stale: "Stale source", "refresh-failed": "Refresh failed", unknown: "Freshness unknown"};
+    const badge = el("span", "freshness-badge " + c.source_freshness,
+      labels[c.source_freshness] || c.source_freshness);
+    badge.title = c.source_freshness === "stale"
+      ? `This source has not been refreshed recently${c.source_age_days != null ? ` (${c.source_age_days} days old)` : ""}. Verify currentness before cutting.`
+      : c.source_freshness === "refresh-failed"
+        ? `The latest refresh failed. The displayed card is the last-known-good copy. ${c.source_refresh_error || ""}`
+        : c.source_freshness === "fresh" ? "This source is within its freshness window." : "No reliable fetch timestamp is available for this source.";
+    m.append(badge);
+  }
   if (c.evidence_status){
     const labels = {traceable: "Traceable evidence", attributed: "Attributed", "needs-review": "Needs review"};
     const badge = el("span", "evidence-badge " + c.evidence_status,
@@ -973,6 +999,56 @@ async function showCard(id, {updateUrl = true} = {}){
   }
 }
 
+function importedSourceEl(s){
+  const n = el("article", "source-card");
+  n.append(el("h3", null, s.title || s.source_id));
+  n.append(el("div", "source-kind", `${s.origin} · ${s.card_count || 0} cards`));
+  if (s.url){
+    const a = el("a", "source-access", "source link");
+    a.href = s.url; a.target = "_blank"; a.rel = "noreferrer"; n.append(a);
+  }
+  const health = s.health || {state: "unknown"};
+  const healthLabels = {fresh: "Fresh", stale: "Stale", "refresh-failed": "Refresh failed", unknown: "Freshness unknown"};
+  const age = health.age_days != null ? ` · ${health.age_days}d old` : "";
+  n.append(el("div", "source-health", `${healthLabels[health.state] || health.state}${age}${s.fetched_at ? ` · fetched ${s.fetched_at}` : ""}`));
+  if (health.error) n.append(el("div", "note", `Last refresh failed; last-known-good cards retained. ${health.error}`));
+  const actions = el("div", "source-actions");
+  const refresh = el("button", "board-btn", "Refresh"); refresh.type = "button";
+  refresh.disabled = !s.url;
+  refresh.onclick = async () => {
+    refresh.disabled = true; refresh.textContent = "Queued…";
+    try {
+      const queued = await api(`/api/sources/${encodeURIComponent(s.source_id)}/refresh`, {method: "POST"});
+      refresh.textContent = "Refreshing…";
+      const poll = setInterval(async () => {
+        try {
+          const job = await api(`/api/ingest/${queued.job_id}`);
+          if (!["completed", "failed", "cancelled"].includes(job.state)) return;
+          clearInterval(poll);
+          if (job.state === "completed") { await showCatalog(); }
+          else { refresh.disabled = false; refresh.textContent = job.error || "Refresh failed"; }
+        } catch (err) { clearInterval(poll); refresh.disabled = false; refresh.textContent = err.message || "Refresh failed"; }
+      }, 700);
+    } catch (err) { refresh.disabled = false; refresh.textContent = err.message || "Refresh failed"; }
+  };
+  const remove = el("button", "board-btn", "Remove"); remove.type = "button";
+  remove.onclick = async () => {
+    if (!window.confirm(`Remove ${s.title || s.source_id} and its cards from this index?`)) return;
+    remove.disabled = true;
+    try { await api(`/api/sources/${encodeURIComponent(s.source_id)}`, {method: "DELETE"}); await showCatalog(); }
+    catch (err) { remove.disabled = false; remove.textContent = err.message || "Remove failed"; }
+  };
+  actions.append(refresh, remove); n.append(actions); return n;
+}
+
+function importJobEl(job){
+  const n = el("div", "import-job");
+  const label = job.url.replace(/^https?:\/\//, "").slice(0, 70);
+  n.append(el("span", null, label));
+  n.append(el("span", "state", `${job.state} · ${job.cards_added || 0} cards`));
+  return n;
+}
+
 function catalogEl(s){
   const n = el("article", "source-card " + (s.access === "gated" ? "gated" : ""));
   const h = el("h3", null, s.name);
@@ -989,11 +1065,88 @@ async function showCatalog(){
   const c = $("#content");
   c.innerHTML = '<div class="spin">loading reviewed sources…</div>';
   try {
-    const r = await api("/api/catalog");
+    const [r, imported, history] = await Promise.all([
+      api("/api/catalog"), api("/api/sources"), api("/api/ingest?limit=8")
+    ]);
     if (request !== viewRequest) return;
     c.innerHTML = "";
     c.append(el("div", "crumb", "Reviewed sources · access boundaries are intentional"));
     c.append(el("p", "empty", "These are source options Card Scraper knows how to handle. Public does not mean redistributable: verify the terms of each file, credit the publisher, and never bypass a login gate."));
+
+    const panel = el("section", "ingest-panel");
+    panel.append(el("h3", null, "Add a public release"));
+    panel.append(el("p", null, "Paste a reviewed public index or direct .docx/.zip/.pdf URL. The same allowlist and conservative parsers as the CLI apply; browser imports are capped at 25 files."));
+    const form = el("form", "ingest-form");
+    const input = document.createElement("input");
+    input.type = "url"; input.required = true; input.placeholder = "https://openev.debatecoaches.org/releases/";
+    input.setAttribute("aria-label", "Public source URL");
+    const button = el("button", "searchbtn", "Import source"); button.type = "submit";
+    const cancel = el("button", "board-btn", "Cancel"); cancel.type = "button"; cancel.hidden = true;
+    const status = el("div", "ingest-status");
+    form.append(input, button, cancel); panel.append(form, status); c.append(panel);
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+      button.disabled = true; input.disabled = true; cancel.hidden = false;
+      status.textContent = "Queueing public source…";
+      let jobId = null; let polling = null; let done = false;
+      cancel.onclick = async () => {
+        if (!jobId) return;
+        cancel.disabled = true; status.textContent = "Cancelling after the current file…";
+        try { await api(`/api/ingest/${jobId}`, {method: "DELETE"}); } catch (_) {}
+      };
+      try {
+        const queued = await api("/api/ingest", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({url: input.value.trim(), limit: 25})});
+        jobId = queued.job_id;
+        status.textContent = "Discovering public evidence…";
+        const poll = async () => {
+          const job = await api(`/api/ingest/${jobId}`);
+          if (job.total) status.textContent = `${job.state === "importing" ? "Importing" : "Discovering"} · ${job.processed}/${job.total} files · ${job.cards_added} cards`;
+          if (["completed", "failed", "cancelled"].includes(job.state)) {
+            done = true; clearInterval(polling);
+            if (job.state === "completed") {
+              status.textContent = `Imported ${job.cards_added} cards from ${job.imported} file${job.imported === 1 ? "" : "s"}. Search is ready.`;
+              const stats = await api("/api/stats");
+              APP_STATS = stats;
+              $("#stats").textContent = `${stats.cards} cards · ${stats.nodes} nodes · ${stats.edges} edges · ${stats.sources} sources`;
+              $("#treebody").innerHTML = ""; await loadTree(null, $("#treebody"), 0);
+            } else if (job.state === "failed") status.textContent = `Import stopped: ${job.error || "source error"}`;
+            else status.textContent = "Import cancelled. Files already completed were kept.";
+            button.disabled = false; input.disabled = false; cancel.hidden = true; cancel.disabled = false;
+          }
+        };
+        await poll();
+        if (!done) polling = setInterval(() => poll().catch(err => { clearInterval(polling); status.textContent = `Import status unavailable: ${err.message || err}`; }), 700);
+      } catch (err) {
+        status.textContent = `Import stopped: ${err.message || err}`;
+        button.disabled = false; input.disabled = false; cancel.hidden = true;
+      }
+    });
+    const importedHead = el("h3", null, "Your indexed sources");
+    importedHead.className = "sec";
+    c.append(importedHead);
+    const staleButton = el("button", "board-btn", "Refresh all stale sources");
+    staleButton.type = "button";
+    staleButton.onclick = async () => {
+      staleButton.disabled = true; staleButton.textContent = "Queueing stale sources…";
+      try {
+        const result = await api("/api/sources/refresh-stale", {method: "POST"});
+        staleButton.textContent = result.count ? `Queued ${result.count} refresh${result.count === 1 ? "" : "es"}` : "No stale sources";
+        if (result.count) setTimeout(() => showCatalog(), 900);
+      } catch (err) { staleButton.disabled = false; staleButton.textContent = err.message || "Refresh failed"; }
+    };
+    c.append(staleButton);
+    if (imported.sources.length){
+      const managed = el("div", "catalog-grid");
+      imported.sources.forEach(s => managed.append(importedSourceEl(s)));
+      c.append(managed);
+    } else c.append(el("p", "empty", "No sources imported yet."));
+    if (history.jobs.length){
+      const historyWrap = el("section", "import-history");
+      historyWrap.append(el("h3", null, "Recent imports"));
+      history.jobs.forEach(job => historyWrap.append(importJobEl(job)));
+      c.append(historyWrap);
+    }
+    c.append(el("h3", "sec", "Reviewed public sources"));
     const grid = el("div", "catalog-grid");
     r.sources.forEach(s => grid.append(catalogEl(s)));
     c.append(grid);

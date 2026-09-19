@@ -198,7 +198,7 @@ only lists the steps you have cards for is useless — the gap is the finding.""
             claim=(raw.get("claim") or "").strip(),
             status=status, card_ids=ids, note=(raw.get("note") or "").strip(),
         ))
-    links.sort(key=lambda l: l.step)
+    links.sort(key=lambda link: link.step)
     return (data.get("thesis") or "").strip(), links, warnings
 
 

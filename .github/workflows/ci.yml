@@ -1,47 +1,49 @@
-name: ci
+name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   test:
+    name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ['3.10', '3.11', '3.12']
 
     steps:
-      - uses: actions/checkout@v5
+      - name: Check out repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v6
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+          cache-dependency-path: pyproject.toml
 
-      # Core deps plus the HTTP test client used by FastAPI TestClient. The
-      # optional extras (scrapling, anthropic, datasets)
-      # are deliberately NOT installed here: the suite must pass without a
-      # model provider, without network, and without the stealth fetch stack,
-      # because that is how most people will first run it. If a test starts
-      # needing one of them, that is a regression in the test, not a missing
-      # dependency in CI.
-      - name: Install
+      - name: Install package and development dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]" ruff
+          python -m pip install -e ".[dev]" ruff
 
-      - name: Lint
-        run: ruff check --select E9,F63,F7,F82,F401,F811,F841 .
-
-      - name: Test
+      - name: Run regression suite
         run: python -m pytest tests/ -q
 
-      # Proves the documented quickstart actually works from nothing, which is
-      # the failure users hit first and contributors never notice.
-      - name: End-to-end smoke test
+      - name: Run lint checks
+        run: ruff check cardgraph tests
+
+      - name: Check Python compilation
+        run: python -m compileall -q cardgraph tests
+
+      - name: Run documented end-to-end smoke test
         run: |
           python -m seed.generate_synthetic data/corpus/synthetic.docx
           python -m seed.build_outline seed/moratorium_outline.yaml data/corpus/skeleton.docx
@@ -49,3 +51,22 @@ jobs:
           python -m cardgraph.cli graph
           python -m cardgraph.cli search "households subsidize industrial load"
           CARDGRAPH_LLM=none python -m cardgraph.cli analyze --top 3
+
+      - name: Build distributable wheel
+        run: python -m pip wheel . --no-deps --wheel-dir dist
+
+      - name: Verify wheel contains the application UI and license
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheels = sorted(Path("dist").glob("*.whl"))
+          assert wheels, "wheel was not created"
+          with ZipFile(wheels[-1]) as wheel:
+              names = set(wheel.namelist())
+          assert any(name.endswith("/LICENSE") for name in names), "license missing from wheel"
+          assert any(name.endswith("/index.html") for name in names), "web UI missing from wheel"
+          print(f"validated {wheels[-1].name}")
+          PY

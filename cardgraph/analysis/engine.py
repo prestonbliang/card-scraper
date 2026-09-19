@@ -324,7 +324,7 @@ def render_text(report: CorpusReport, max_positions: int = 10,
                 L.append("")
 
     total_pos = len(report.contentions)
-    L.append(f"POSITIONS, WORST FIRST"
+    L.append("POSITIONS, WORST FIRST"
              + (f"  (showing {min(max_positions, total_pos)} of {total_pos})"
                 if total_pos > max_positions else ""))
     L.append("-" * 72)
