@@ -11,13 +11,15 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import threading
 from datetime import datetime, timezone
 import time
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.background import BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -28,6 +30,8 @@ from ..index.store import Store
 from ..ingest.base import OnlineEvidenceAdapter
 from ..ingest.policy import AccessRefused, source_catalog
 from ..parse.docx_card import UnsupportedFormat, parse_any
+from ..workspace import (MAX_TOTAL_BYTES, WorkspaceBundleError, bundle_summary,
+                         export_bundle, inspect_bundle, restore_bundle)
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))), "web")
@@ -42,6 +46,11 @@ class IngestRequest(BaseModel):
         default="verify source terms before use", max_length=300,
     )
     replace_source_id: str | None = Field(default=None, max_length=100)
+
+
+class WorkspaceExportRequest(BaseModel):
+    browser_state: dict | None = None
+    include_corpus: bool = True
 
 
 def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
@@ -69,6 +78,92 @@ def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
     @app.get("/api/stats")
     def stats() -> dict:
         return store.stats()
+
+    @app.post("/api/workspace/export")
+    def workspace_export(request: WorkspaceExportRequest,
+                         background_tasks: BackgroundTasks) -> FileResponse:
+        """Download a verified ZIP snapshot without exposing its temp path."""
+        try:
+            fd, path = tempfile.mkstemp(prefix="card-scraper-", suffix=".zip")
+            os.close(fd)
+            export_bundle(db_path, path, browser_state=request.browser_state,
+                          include_corpus=request.include_corpus)
+        except WorkspaceBundleError as exc:
+            if "path" in locals() and os.path.exists(path):
+                os.remove(path)
+            raise HTTPException(400, str(exc)) from exc
+        background_tasks.add_task(os.remove, path)
+        return FileResponse(path, media_type="application/zip",
+                            filename="card-scraper-workspace.zip")
+
+    @app.post("/api/workspace/inspect")
+    async def workspace_inspect(request: Request) -> dict:
+        """Preflight a bundle without touching the current workspace."""
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > MAX_TOTAL_BYTES:
+                    raise HTTPException(413, "workspace bundle is too large")
+            except ValueError as exc:
+                raise HTTPException(400, "invalid content length") from exc
+        fd, path = tempfile.mkstemp(prefix="card-scraper-inspect-", suffix=".zip")
+        os.close(fd)
+        size = 0
+        try:
+            with open(path, "wb") as target:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > MAX_TOTAL_BYTES:
+                        raise HTTPException(413, "workspace bundle is too large")
+                    target.write(chunk)
+            result = inspect_bundle(path)
+            return {"bundle": bundle_summary(result.manifest),
+                    "browser_state": result.browser_state, "stats": result.stats,
+                    "dropped_pins": result.dropped_pins}
+        except WorkspaceBundleError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    @app.post("/api/workspace/restore")
+    async def workspace_restore(request: Request) -> dict:
+        """Validate a ZIP upload completely before replacing this local index."""
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                declared_size = int(content_length)
+            except ValueError as exc:
+                raise HTTPException(400, "invalid content length") from exc
+            if declared_size < 0 or declared_size > MAX_TOTAL_BYTES:
+                raise HTTPException(413, "workspace bundle is too large")
+        fd, path = tempfile.mkstemp(prefix="card-scraper-upload-", suffix=".zip")
+        os.close(fd)
+        size = 0
+        try:
+            with open(path, "wb") as target:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > MAX_TOTAL_BYTES:
+                        raise HTTPException(413, "workspace bundle is too large")
+                    target.write(chunk)
+            result = restore_bundle(db_path, path, connection=store.conn)
+            engine.build(use_cache=False)
+            return {
+                "restored": bundle_summary(result.manifest),
+                "browser_state": result.browser_state,
+                "stats": result.stats,
+                "dropped_pins": result.dropped_pins,
+            }
+        except WorkspaceBundleError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
     @app.get("/api/catalog")
     def catalog() -> dict:
@@ -114,6 +209,47 @@ def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
             with jobs_lock:
                 job.update(state="importing", total=len(acquired))
             worker_store.save_ingest_job(job)
+
+            if job.get("replace_source_id"):
+                # Stage every replacement before touching the live index. A
+                # source can expand to several files; parsing one successfully
+                # and failing on the next must not create a mixed release.
+                staged = []
+                for index, item in enumerate(acquired, 1):
+                    with jobs_lock:
+                        if job["cancel"].is_set():
+                            job["state"] = "cancelled"
+                            worker_store.save_ingest_job(job)
+                            return
+                    try:
+                        cards, root, _report = parse_any(item.path, item.source.source_id)
+                    except (UnsupportedFormat, Exception) as exc:  # noqa: BLE001
+                        error = f"{os.path.basename(item.path)}: {exc}"
+                        with jobs_lock:
+                            job["failed"] += 1
+                            job["details"].append(error)
+                            job["state"] = "failed"
+                            job["error"] = "refresh failed; last-known-good evidence was retained"
+                        worker_store.mark_source_refresh_failed(
+                            job["replace_source_id"], error)
+                        worker_store.save_ingest_job(job)
+                        return
+                    item.source.card_count = len(cards)
+                    staged.append((item.source, cards, root))
+                    with jobs_lock:
+                        job["processed"] = index
+                    worker_store.save_ingest_job(job)
+
+                added = worker_store.replace_source(job["replace_source_id"], staged)
+                with jobs_lock:
+                    job["imported"] = len(staged)
+                    job["cards_added"] = added
+                    job["state"] = "completed"
+                    job["stats"] = worker_store.stats()
+                worker_store.clear_source_refresh_failure(job["replace_source_id"])
+                worker_store.save_ingest_job(job)
+                return
+
             replaced = False
             for index, item in enumerate(acquired, 1):
                 with jobs_lock:

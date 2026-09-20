@@ -11,6 +11,8 @@
     python -m cardgraph.cli search "households subsidize industrial load"
     python -m cardgraph.cli stats
     python -m cardgraph.cli policy
+    python -m cardgraph.cli workspace export data/card-scraper-workspace.zip
+    python -m cardgraph.cli workspace import data/card-scraper-workspace.zip
     python -m cardgraph.cli serve
 """
 
@@ -30,6 +32,8 @@ from .ingest.base import (CaselistArchiveAdapter, GitRepoAdapter,
 from .ingest.policy import (AccessPolicy, AccessRefused, explain_allowlist,
                             source_catalog)
 from .parse.docx_card import UnsupportedFormat, parse_any
+from .workspace import (WorkspaceBundleError, bundle_summary, export_bundle,
+                         inspect_bundle, restore_bundle)
 
 
 def _positive_int(value: str) -> int:
@@ -290,6 +294,53 @@ def cmd_policy(args) -> int:
     return 0
 
 
+def _read_browser_state(path: str | None) -> dict | None:
+    if not path:
+        return None
+    import json
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise WorkspaceBundleError(f"could not read browser state: {exc}") from exc
+
+
+def cmd_workspace_export(args) -> int:
+    manifest = export_bundle(
+        args.db, args.bundle, browser_state=_read_browser_state(args.state),
+        include_corpus=not args.no_corpus,
+    )
+    print(f"exported {args.bundle}")
+    for key, value in bundle_summary(manifest).items():
+        print(f"{key}: {value}")
+    return 0
+
+
+def cmd_workspace_inspect(args) -> int:
+    inspection = inspect_bundle(args.bundle)
+    print(f"validated {args.bundle}")
+    for key, value in bundle_summary(inspection.manifest).items():
+        print(f"{key}: {value}")
+    print(f"stats: {inspection.stats}")
+    if inspection.dropped_pins:
+        print(f"warning: {inspection.dropped_pins} board pin(s) refer to cards not in this bundle")
+    return 0
+
+
+def cmd_workspace_import(args) -> int:
+    restored = restore_bundle(args.db, args.bundle)
+    print(f"restored {args.bundle}")
+    for key, value in bundle_summary(restored.manifest).items():
+        print(f"{key}: {value}")
+    print(f"imported files: {restored.imported_files}")
+    print(f"stats: {restored.stats}")
+    if restored.dropped_pins:
+        print(f"warning: dropped {restored.dropped_pins} board pin(s) not present in the restored index")
+    if restored.browser_state is not None:
+        print("browser state: included (API clients can restore it locally)")
+    return 0
+
+
 def cmd_catalog(args) -> int:
     """Print reviewed public and gated source profiles."""
     for source in source_catalog():
@@ -384,6 +435,21 @@ def main(argv: list[str] | None = None) -> int:
     po = sub.add_parser("policy")
     po.set_defaults(func=cmd_policy)
 
+    ws = sub.add_parser("workspace", help="portable, integrity-checked workspace bundles")
+    ws_sub = ws.add_subparsers(dest="workspace_cmd", required=True)
+    wse = ws_sub.add_parser("export", help="export the database, corpus, and optional browser state")
+    wse.add_argument("bundle", help="destination .zip path")
+    wse.add_argument("--state", help="JSON file exported from the browser workspace")
+    wse.add_argument("--no-corpus", action="store_true",
+                     help="export the index and metadata without source files")
+    wse.set_defaults(func=cmd_workspace_export)
+    wsi = ws_sub.add_parser("import", help="validate and restore a workspace bundle")
+    wsi.add_argument("bundle", help="source .zip path")
+    wsi.set_defaults(func=cmd_workspace_import)
+    wsv = ws_sub.add_parser("inspect", help="preflight a bundle without changing the index")
+    wsv.add_argument("bundle", help="source .zip path")
+    wsv.set_defaults(func=cmd_workspace_inspect)
+
     ca = sub.add_parser("catalog", help="show reviewed evidence sources and access notes")
     ca.set_defaults(func=cmd_catalog)
 
@@ -395,6 +461,9 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     try:
         return args.func(args)
+    except WorkspaceBundleError as exc:
+        print(f"workspace error: {exc}", file=sys.stderr)
+        return 2
     except BrokenPipeError:
         # piping into `head` is normal usage, not an error
         try:

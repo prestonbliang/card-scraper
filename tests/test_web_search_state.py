@@ -58,6 +58,15 @@ def test_search_state_is_shareable_and_restorable():
         'source_freshness',
         'Refresh all stale sources',
         '/api/sources/refresh-stale',
+        'function workspaceState()',
+        'function exportWorkspace()',
+        'function inspectWorkspace(file)',
+        'function restoreWorkspace(file)',
+        '/api/workspace/export',
+        '/api/workspace/inspect',
+        '/api/workspace/restore',
+        'Export workspace',
+        'Portable workspace',
     ):
         assert marker in html
 
@@ -77,6 +86,16 @@ def test_research_board_is_local_and_exportable():
     assert "card-scraper-research-board.md" in html
     assert "Export cited brief" in html
     assert "Affirmative" in html and "Negative" in html
+
+
+def test_workspace_bundle_controls_are_browser_state_aware():
+    html = WEB.read_text(encoding="utf-8")
+    assert "pinned_order: orderedPinned()" in html
+    assert "recent_searches: getRecentSearches()" in html
+    assert 'headers: {"Content-Type": "application/zip"}' in html
+    assert "Validated Card Scraper workspace" in html
+    assert "stale pin" in html
+    assert 'accept = ".zip,application/zip"' in html
 
 
 def test_detail_urls_have_copy_link_controls():

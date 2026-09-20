@@ -185,6 +185,81 @@ def test_source_health_marks_stale_and_failed_refresh_preserves_cards(tmp_path, 
         assert client.get("/api/search?q=known+good").json()["count"] == 1
 
 
+def test_multi_file_refresh_is_atomic(tmp_path, monkeypatch):
+    import cardgraph.api.main as api_main
+
+    db = tmp_path / "atomic.db"
+    seed = Store(str(db))
+    seed.add_source(Source(
+        source_id="release-old", path="old.docx", title="Release old",
+        origin="online", license="fixture", url="https://openev.debatecoaches.org/release/",
+        fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), card_count=1,
+    ))
+    seed.add_cards([Card(
+        tag="Old evidence", cite=Cite(raw="Old 2025"), body="Old evidence. " * 8,
+        read_text="Old evidence.", source_id="release-old", source_path="old.docx", ordinal=0,
+    )])
+    seed.close()
+
+    first_source = Source(
+        source_id="release-new-one", path="one.docx", title="Release one",
+        origin="online", license="fixture", url="https://openev.debatecoaches.org/one.docx",
+    )
+    second_source = Source(
+        source_id="release-new-two", path="two.docx", title="Release two",
+        origin="online", license="fixture", url="https://openev.debatecoaches.org/two.docx",
+    )
+
+    class MultiAdapter:
+        def __init__(self, **_kwargs):
+            pass
+
+        def acquire(self, limit=None):
+            return [Acquired(path="one.docx", source=first_source),
+                    Acquired(path="two.docx", source=second_source)]
+
+    monkeypatch.setattr(api_main, "OnlineEvidenceAdapter", MultiAdapter)
+    calls = {"count": 0, "fail_second": True}
+    first_card = Card(tag="New first", cite=Cite(raw="New 2026"),
+                      body="New first. " * 8, read_text="New first.",
+                      source_id=first_source.source_id, source_path="one.docx", ordinal=0)
+    second_card = Card(tag="New second", cite=Cite(raw="New 2026"),
+                       body="New second. " * 8, read_text="New second.",
+                       source_id=second_source.source_id, source_path="two.docx", ordinal=0)
+
+    def parse(path, source_id):
+        calls["count"] += 1
+        if calls["fail_second"] and calls["count"] == 2:
+            raise RuntimeError("second file is corrupt")
+        card = first_card if source_id == first_source.source_id else second_card
+        return [card], OutlineNode(title=source_id, kind=NodeKind.POCKET, source_id=source_id), object()
+
+    monkeypatch.setattr(api_main, "parse_any", parse)
+    with TestClient(api_main.create_app(str(db))) as client:
+        queued = client.post("/api/sources/release-old/refresh")
+        for _ in range(50):
+            status = client.get(f"/api/ingest/{queued.json()['job_id']}").json()
+            if status["state"] == "failed":
+                break
+            time.sleep(0.01)
+        assert status["state"] == "failed"
+        assert client.get("/api/search?q=old+evidence").json()["count"] == 1
+        assert client.get("/api/search?q=new+first").json()["count"] == 0
+
+        calls["count"] = 0
+        calls["fail_second"] = False
+        success = client.post("/api/sources/release-old/refresh")
+        for _ in range(50):
+            status = client.get(f"/api/ingest/{success.json()['job_id']}").json()
+            if status["state"] == "completed":
+                break
+            time.sleep(0.01)
+        assert status["state"] == "completed"
+        assert client.get("/api/search?q=old+evidence").json()["count"] == 0
+        assert client.get("/api/search?q=new+first").json()["count"] == 1
+        assert client.get("/api/search?q=new+second").json()["count"] == 1
+
+
 def test_api_search_and_card_preserve_provenance(tmp_path):
     with TestClient(_app(tmp_path)) as client:
         result = client.get("/api/search", params={"q": "grid costs"})

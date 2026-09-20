@@ -11,6 +11,8 @@ plain document scraper.
 - Refresh, remove, and monitor indexed sources without losing the last-known-good evidence.
 - Share searches, cards, and contention/block detail links.
 - Pin cards to a local research board with ordering, private notes, and cited Markdown export.
+- Export and restore hash-verified portable workspaces from the CLI or browser, including source files and browser state.
+- Preflight workspace bundles before restore so replacement is explicit and reviewable; stale board pins are reported and removed safely.
 - Include the MIT license in source distributions and built wheels.
 - Run the complete test, lint, compilation, and packaging gate on Python 3.10–3.12.
 

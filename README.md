@@ -173,13 +173,38 @@ it uses the same allowlist, robots checks, parsers, and provenance recording as
 the CLI, with a 25-file browser cap. Import jobs and source records persist in
 SQLite, so reloads do not erase history. The Sources workspace can refresh a
 public source or remove its cards and graph rows without touching other sources.
-Refresh parses the replacement first and swaps it in only after a successful
-parse, so a failed refresh preserves the last known-good evidence. Sources also
+Refresh stages every replacement file first and swaps the complete source in
+one transaction, so a failed multi-file refresh preserves the last known-good
+evidence. Sources also
 report **Fresh**, **Stale**, or **Refresh failed** health: online releases use a
 30-day freshness window, while dataset-style releases use 90 days. A failed
 refresh is never silently treated as current, and the Sources workspace can
 queue every stale public source at once.
-Use the CLI for large or resumable imports.
+Use the CLI for large or resumable imports. You can also carry the complete
+local workspace between machines. A bundle contains a SQLite snapshot, any
+source files that still exist locally, source hashes, optional analysis output,
+and the browser board/recent-search state. Restore verifies every member and the
+SQLite integrity check before replacing the destination index; imported files
+are copied into a new managed folder rather than overwriting an existing corpus.
+It does not change the license of the evidence files.
+
+```bash
+python -m cardgraph.cli workspace export data/card-scraper-workspace.zip
+python -m cardgraph.cli workspace export data/card-scraper-metadata.zip --no-corpus
+python -m cardgraph.cli workspace inspect data/card-scraper-workspace.zip
+python -m cardgraph.cli workspace import data/card-scraper-workspace.zip
+```
+
+`workspace inspect` is a read-only preflight: it verifies hashes, ZIP safety,
+the SQLite schema, and the bundle's card/source counts without changing your
+index. The browser performs the same preflight and asks for confirmation before
+replacing the current workspace.
+
+The browser **Board** and **Sources** views expose the same export/restore
+workflow. Restoring returns the board and recent searches to the browser after
+hash validation. Pins for cards that are not present in the restored index are
+reported during preflight and removed rather than leaving broken board cards.
+Keep bundles private when they contain evidence or notes.
 
 ```bash
 python -m cardgraph.cli ingest-opendebate \
@@ -346,6 +371,7 @@ cardgraph/
   ingest/base.py       local / git / http-index / online / openev adapters
   ingest/opendebate.py OpenDebateEvidence streaming adapter
   index/store.py       SQLite schema, FTS5 over read_text
+  workspace.py         hash-verified portable database/corpus/browser bundles
   index/search.py      BM25 + TF-IDF, RRF fusion, coverage check, cached index
   graph/relate.py      answer edges, duplicate detection, warrant flags
   llm/provider.py      providers, structured output, cache, ledger, salvage

@@ -257,6 +257,8 @@ h4.sec{font-size:11px;text-transform:uppercase;letter-spacing:.09em;
 .ingest-form input{flex:1;min-width:240px}
 .ingest-status{margin-top:9px;font-size:12px;color:var(--muted)}
 .source-actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:10px}
+.workspace-actions{display:flex;gap:7px;flex-wrap:wrap;margin:10px 0}
+.workspace-actions input[type=file]{max-width:240px;font-size:11px;color:var(--muted)}
 .source-health{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:7px}
 .import-history{margin:18px 0}.import-history h3{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 8px}
 .import-job{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;border-bottom:1px solid var(--line);padding:8px 0;font-size:12px}
@@ -339,6 +341,54 @@ const api = async (p, opts = {}) => {
   }
   return data;
 };
+
+function workspaceState(){
+  return {pinned: PINNED, pinned_order: orderedPinned(), recent_searches: getRecentSearches()};
+}
+
+function applyWorkspaceState(state){
+  if (!state || typeof state !== "object") return;
+  if (state.pinned && typeof state.pinned === "object") PINNED = state.pinned;
+  if (Array.isArray(state.pinned_order)) PINNED_ORDER = state.pinned_order;
+  savePinned();
+  if (Array.isArray(state.recent_searches)) {
+    try { localStorage.setItem(RECENT_SEARCHES_KEY, JSON.stringify(state.recent_searches.slice(0, 100))); } catch (_) {}
+  }
+}
+
+async function exportWorkspace(){
+  const response = await fetch("/api/workspace/export", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({browser_state: workspaceState(), include_corpus: true}),
+  });
+  if (!response.ok) throw new Error(`workspace export failed (${response.status})`);
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a"); link.href = url; link.download = "card-scraper-workspace.zip";
+  link.click(); URL.revokeObjectURL(url);
+}
+
+async function inspectWorkspace(file){
+  const response = await fetch("/api/workspace/inspect", {
+    method: "POST", headers: {"Content-Type": "application/zip"}, body: file,
+  });
+  let result = null; try { result = await response.json(); } catch (_) {}
+  if (!response.ok) throw new Error(result && result.detail ? result.detail : `workspace validation failed (${response.status})`);
+  return result;
+}
+
+async function restoreWorkspace(file){
+  const response = await fetch("/api/workspace/restore", {
+    method: "POST", headers: {"Content-Type": "application/zip"}, body: file,
+  });
+  let result = null; try { result = await response.json(); } catch (_) {}
+  if (!response.ok) throw new Error(result && result.detail ? result.detail : `workspace restore failed (${response.status})`);
+  applyWorkspaceState(result.browser_state);
+  APP_STATS = result.stats;
+  $("#stats").textContent = `${result.stats.cards} cards · ${result.stats.nodes} nodes · ${result.stats.edges} edges · ${result.stats.sources} sources`;
+  $("#treebody").innerHTML = ""; await loadTree(null, $("#treebody"), 0);
+  return result;
+}
 let viewRequest = 0;
 const showError = (target, err) => {
   target.innerHTML = "";
@@ -597,10 +647,13 @@ function showBoard(){
   const actions = el("div", "board-actions");
   const exportButton = el("button", "board-btn primary", "Export cited brief");
   exportButton.type = "button"; exportButton.disabled = !cards.length; exportButton.onclick = exportBoard;
+  const workspaceButton = el("button", "board-btn", "Export workspace");
+  workspaceButton.type = "button"; workspaceButton.title = "Download the index, evidence files, pins, notes, and recent searches";
+  workspaceButton.onclick = async () => { workspaceButton.disabled = true; workspaceButton.textContent = "Preparing…"; try { await exportWorkspace(); workspaceButton.textContent = "Workspace exported"; } catch (err) { workspaceButton.textContent = err.message || "Export failed"; } finally { setTimeout(() => { workspaceButton.disabled = false; workspaceButton.textContent = "Export workspace"; }, 1800); } };
   const clear = el("button", "board-btn", "Clear board");
   clear.type = "button"; clear.disabled = !cards.length;
   clear.onclick = () => { PINNED = {}; PINNED_ORDER = []; savePinned(); showBoard(); };
-  actions.append(exportButton, clear); toolbar.append(actions); c.append(toolbar);
+  actions.append(exportButton, workspaceButton, clear); toolbar.append(actions); c.append(toolbar);
   if (!cards.length){
     const empty = el("div", "empty");
     empty.append(el("h2", null, "Your board is empty."));
@@ -1072,6 +1125,16 @@ async function showCatalog(){
     c.innerHTML = "";
     c.append(el("div", "crumb", "Reviewed sources · access boundaries are intentional"));
     c.append(el("p", "empty", "These are source options Card Scraper knows how to handle. Public does not mean redistributable: verify the terms of each file, credit the publisher, and never bypass a login gate."));
+
+    const workspace = el("section", "ingest-panel");
+    workspace.append(el("h3", null, "Portable workspace"));
+    workspace.append(el("p", null, "Move the database, source files, pins, notes, and recent searches between machines. Bundles are hash-verified before restore and source redistribution terms still apply."));
+    const workspaceActions = el("div", "workspace-actions");
+    const exportWorkspaceButton = el("button", "board-btn", "Export workspace"); exportWorkspaceButton.type = "button";
+    exportWorkspaceButton.onclick = async () => { exportWorkspaceButton.disabled = true; exportWorkspaceButton.textContent = "Preparing…"; try { await exportWorkspace(); exportWorkspaceButton.textContent = "Downloaded"; } catch (err) { exportWorkspaceButton.textContent = err.message || "Export failed"; } finally { setTimeout(() => { exportWorkspaceButton.disabled = false; exportWorkspaceButton.textContent = "Export workspace"; }, 1800); } };
+    const restoreInput = document.createElement("input"); restoreInput.type = "file"; restoreInput.accept = ".zip,application/zip"; restoreInput.setAttribute("aria-label", "Restore workspace bundle");
+    restoreInput.addEventListener("change", async () => { const file = restoreInput.files && restoreInput.files[0]; if (!file) return; restoreInput.disabled = true; try { const preview = await inspectWorkspace(file); const b = preview.bundle; const decision = window.confirm(`Validated Card Scraper workspace\\n\\n${b.sources} sources · ${b.source_files} source files · ${preview.stats.cards} cards\\nBrowser board: ${b.has_browser_state ? "included" : "not included"}${preview.dropped_pins ? ` · ${preview.dropped_pins} stale pin${preview.dropped_pins === 1 ? "" : "s"} will be removed` : ""}\\n\\nRestore this bundle and replace the current index?`); if (!decision) { status.textContent = "Restore cancelled. Your current workspace was not changed."; return; } const restored = await restoreWorkspace(file); status.textContent = restored.dropped_pins ? `Workspace restored. Removed ${restored.dropped_pins} stale board pin${restored.dropped_pins === 1 ? "" : "s"}.` : "Workspace restored. Your index and board are ready."; await showCatalog(); } catch (err) { status.textContent = err.message || "Restore failed"; } finally { restoreInput.disabled = false; restoreInput.value = ""; } });
+    workspaceActions.append(exportWorkspaceButton, restoreInput); workspace.append(workspaceActions); c.append(workspace);
 
     const panel = el("section", "ingest-panel");
     panel.append(el("h3", null, "Add a public release"));

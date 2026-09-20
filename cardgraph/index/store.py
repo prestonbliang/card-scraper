@@ -210,59 +210,103 @@ class Store:
             out.append(item)
         return out
 
-    def remove_source(self, source_id: str) -> None:
-        """Remove one imported file and its derived search/graph rows.
+    def _remove_source_rows(self, c, source_id: str) -> None:
+        node_ids = [r[0] for r in c.execute(
+            "SELECT node_id FROM nodes WHERE source_id=?", (source_id,))]
+        card_ids = [r[0] for r in c.execute(
+            "SELECT card_id FROM cards WHERE source_id=?", (source_id,))]
+        edge_ids = node_ids + card_ids
+        if edge_ids:
+            placeholders = ",".join("?" * len(edge_ids))
+            c.execute(
+                f"DELETE FROM edges WHERE src_node_id IN ({placeholders}) "
+                f"OR dst_node_id IN ({placeholders})",
+                (*edge_ids, *edge_ids),
+            )
+        if node_ids:
+            placeholders = ",".join("?" * len(node_ids))
+            c.execute(f"DELETE FROM nodes WHERE node_id IN ({placeholders})", node_ids)
+        if card_ids:
+            placeholders = ",".join("?" * len(card_ids))
+            # Contentless FTS5 tables require the delete command with the
+            # original indexed values before the mapping rows disappear.
+            fts_rows = c.execute(
+                f"SELECT m.rowid, c.tag, c.read_text, c.cite_raw, c.body "
+                f"FROM fts_map m JOIN cards c ON c.card_id=m.card_id "
+                f"WHERE m.card_id IN ({placeholders})", card_ids,
+            ).fetchall()
+            for fts_row in fts_rows:
+                c.execute(
+                    "INSERT INTO cards_fts(cards_fts, rowid, tag, read_text, cite_raw, body) "
+                    "VALUES('delete',?,?,?,?,?)", tuple(fts_row),
+                )
+            c.execute(f"DELETE FROM fts_map WHERE card_id IN ({placeholders})", card_ids)
+            c.execute(f"DELETE FROM cards WHERE card_id IN ({placeholders})", card_ids)
+        c.execute("DELETE FROM sources WHERE source_id=?", (source_id,))
 
-        Re-ingesting an edited document must replace its old cards rather than
-        leave stale evidence beside the new parse. Cards are source-owned in the
-        store, so deleting the source's cards also keeps FTS and outline rows in
-        sync. Callers use this only after a replacement parsed successfully.
+    def remove_source(self, source_id: str) -> None:
+        """Remove one source and all source-owned derived rows."""
+        with self.tx() as c:
+            self._remove_source_rows(c, source_id)
+
+    def _add_source_row(self, c, src: Source) -> None:
+        c.execute(
+            """INSERT OR REPLACE INTO sources
+               (source_id, path, title, origin, license, fetched_at, url, card_count)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (src.source_id, src.path, src.title, src.origin, src.license,
+             src.fetched_at, src.url, src.card_count),
+        )
+
+    def _add_cards(self, c, cards: list[Card]) -> int:
+        added = 0
+        for card in cards:
+            cur = c.execute(
+                """INSERT OR IGNORE INTO cards
+                   (card_id, tag, cite_raw, cite_author, cite_year, cite_pub,
+                    cite_url, body, read_text, emphasis_text, read_ratio, side,
+                    path_json, block, pocket, source_id, source_path, ordinal,
+                    warrant_flags, disclosed_only, round_context)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (card.card_id, card.tag, card.cite.raw, card.cite.author,
+                 card.cite.year, card.cite.publication, card.cite.url,
+                 card.body, card.read_text, card.emphasis_text,
+                 card.read_ratio, card.side.value, json.dumps(card.path),
+                 card.block, card.pocket, card.source_id, card.source_path,
+                 card.ordinal, json.dumps(card.warrant_flags),
+                 1 if card.disclosed_only else 0, card.round_context),
+            )
+            if cur.rowcount:
+                added += 1
+                m = c.execute(
+                    "INSERT OR IGNORE INTO fts_map (card_id) VALUES (?)",
+                    (card.card_id,),
+                )
+                rowid = m.lastrowid
+                if rowid:
+                    c.execute(
+                        "INSERT INTO cards_fts (rowid, tag, read_text, cite_raw, body) "
+                        "VALUES (?,?,?,?,?)",
+                        (rowid, card.tag, card.read_text, card.cite.raw, card.body),
+                    )
+        return added
+
+    def replace_source(self, source_id: str,
+                       replacements: list[tuple[Source, list[Card], OutlineNode]]) -> int:
+        """Atomically swap every file belonging to a refreshed source.
+
+        Parsing happens before this method is called. The delete and all inserts
+        share one SQLite transaction, so a multi-file refresh cannot expose a
+        half-old, half-new corpus or lose the last-known-good source.
         """
         with self.tx() as c:
-            node_ids = [r[0] for r in c.execute(
-                "SELECT node_id FROM nodes WHERE source_id=?", (source_id,))]
-            card_ids = [r[0] for r in c.execute(
-                "SELECT card_id FROM cards WHERE source_id=?", (source_id,))]
-            edge_ids = node_ids + card_ids
-            if edge_ids:
-                placeholders = ",".join("?" * len(edge_ids))
-                c.execute(
-                    f"DELETE FROM edges WHERE src_node_id IN ({placeholders}) "
-                    f"OR dst_node_id IN ({placeholders})",
-                    (*edge_ids, *edge_ids),
-                )
-            if node_ids:
-                placeholders = ",".join("?" * len(node_ids))
-                c.execute(
-                    f"DELETE FROM nodes WHERE node_id IN ({placeholders})",
-                    node_ids,
-                )
-            if card_ids:
-                placeholders = ",".join("?" * len(card_ids))
-                # Contentless FTS5 tables reject ordinary DELETE statements.
-                # Use the FTS5 delete command with the original indexed values
-                # before removing the mapping rows; this keeps the index valid
-                # when an edited source is replaced.
-                fts_rows = c.execute(
-                    f"SELECT m.rowid, c.tag, c.read_text, c.cite_raw, c.body "
-                    f"FROM fts_map m JOIN cards c ON c.card_id=m.card_id "
-                    f"WHERE m.card_id IN ({placeholders})", card_ids,
-                ).fetchall()
-                for fts_row in fts_rows:
-                    c.execute(
-                        "INSERT INTO cards_fts(cards_fts, rowid, tag, read_text, cite_raw, body) "
-                        "VALUES('delete',?,?,?,?,?)",
-                        tuple(fts_row),
-                    )
-                c.execute(
-                    f"DELETE FROM fts_map WHERE card_id IN ({placeholders})",
-                    card_ids,
-                )
-                c.execute(
-                    f"DELETE FROM cards WHERE card_id IN ({placeholders})",
-                    card_ids,
-                )
-            c.execute("DELETE FROM sources WHERE source_id=?", (source_id,))
+            self._remove_source_rows(c, source_id)
+            added = 0
+            for src, cards, root in replacements:
+                self._add_source_row(c, src)
+                added += self._add_cards(c, cards)
+                self._add_outline(c, root, None)
+            return added
 
     def mark_source_refresh_failed(self, source_id: str, error: str) -> None:
         """Remember a failed refresh while keeping the last-known-good cards."""
