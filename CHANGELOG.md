@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add **research packets**: export pinned cards or search results as a ZIP with a Markdown brief, BibTeX bibliography, CSV spreadsheet, and provenance manifest — from the CLI (`cardgraph packet`), the API (`POST /api/packet`), or the board and search views.
+- Fix refresh retries being coalesced onto an already-failed job, which could make a retry report the old failure without running (visible only under CI disk latency).
 - Recover crashed or interrupted background imports as durable failed jobs.
 - Make source downloads, ZIP extraction, and analysis/LLM caches atomic and self-healing.
 - Add `/api/health` readiness diagnostics and coalesce duplicate source refreshes.

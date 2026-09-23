@@ -104,7 +104,7 @@ main{display:grid;grid-template-columns:300px 1fr;gap:0;min-height:calc(100vh - 
 
 #content{padding:20px 24px;max-width:900px}
 body.analysis #content{max-width:1180px}
-.crumb{font-size:12px;color:var(--muted);margin-bottom:14px;font-family:var(--mono)}
+.crumb{font-size:12px;color:var(--muted);margin-bottom:14px;font-family:var(--mono);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .empty{color:var(--muted);padding:40px 0;max-width:56ch}
 .empty h2{font-size:15px;color:var(--ink);margin:0 0 8px}
 
@@ -356,6 +356,25 @@ function applyWorkspaceState(state){
   }
 }
 
+async function exportPacket(payload){
+  const response = await fetch("/api/packet", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    let detail = `packet export failed (${response.status})`;
+    try { const err = await response.json(); if (err.detail) detail = err.detail; } catch (_) {}
+    throw new Error(detail);
+  }
+  const disposition = response.headers.get("content-disposition") || "";
+  const match = disposition.match(/filename="?([^";]+)"?/);
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a"); link.href = url;
+  link.download = match ? match[1] : "card-scraper-packet.zip";
+  link.click(); URL.revokeObjectURL(url);
+}
+
 async function exportWorkspace(){
   const response = await fetch("/api/workspace/export", {
     method: "POST", headers: {"Content-Type": "application/json"},
@@ -584,23 +603,6 @@ function boardText(card){
   return `- ${card.tag || "Untitled"} [${side}]\n  Citation: ${card.cite_raw || "not available"}\n  Source: ${card.source_title || card.source_id || "not recorded"}${card.source_url ? ` — ${card.source_url}` : ""}\n  Read text: ${card.read_text || "(no read text parsed)"}\n  Private note: ${card.note || "(none)"}`;
 }
 
-function exportBoard(){
-  const cards = orderedPinned().map(id => PINNED[id]);
-  const groups = [["Affirmative", cards.filter(c => c.side === "aff")], ["Negative", cards.filter(c => c.side === "neg")], ["Unclassified", cards.filter(c => !["aff", "neg"].includes(c.side))]];
-  const text = [
-    "# Card Scraper research board", "",
-    "Pinned evidence for review — retrieval metadata is not a factual verdict.", "",
-    ...groups.flatMap(([name, items]) => {
-      const body = items.length ? items.flatMap(c => [boardText(c), ""]) : ["(none)", ""];
-      return [`## ${name}`, "", ...body];
-    }),
-  ].join("\n");
-  const blob = new Blob([text], {type: "text/markdown;charset=utf-8"});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a"); a.href = url; a.download = "card-scraper-research-board.md";
-  a.click(); URL.revokeObjectURL(url);
-}
-
 function reorderPinned(draggedId, targetId){
   const order = orderedPinned().filter(id => id !== draggedId);
   const at = order.indexOf(targetId);
@@ -645,15 +647,41 @@ function showBoard(){
   const toolbar = el("div", "board-toolbar");
   toolbar.append(el("h2", null, "Research board"));
   const actions = el("div", "board-actions");
-  const exportButton = el("button", "board-btn primary", "Export cited brief");
-  exportButton.type = "button"; exportButton.disabled = !cards.length; exportButton.onclick = exportBoard;
+  const exportButton = el("button", "board-btn primary", "Export research packet");
+  exportButton.type = "button"; exportButton.disabled = !cards.length;
+  exportButton.title = "Download a ZIP with a Markdown brief, BibTeX bibliography, CSV spreadsheet, and provenance manifest";
+  exportButton.onclick = async () => {
+    exportButton.disabled = true; exportButton.textContent = "Preparing…";
+    try {
+      await exportPacket({card_ids: cards.map(c => c.card_id)});
+      exportButton.textContent = "Packet exported";
+    } catch (err) {
+      exportButton.textContent = err.message || "Export failed";
+    } finally {
+      setTimeout(() => { exportButton.disabled = false; exportButton.textContent = "Export research packet"; }, 1800);
+    }
+  };
+  const copyButton = el("button", "board-btn", "Copy brief text");
+  copyButton.type = "button"; copyButton.disabled = !cards.length;
+  copyButton.title = "Copy a plain-text brief for chat or a document";
+  copyButton.onclick = async () => {
+    const text = cards.map(boardText).join("\n\n");
+    try {
+      if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(text);
+      else throw new Error("clipboard unavailable");
+      copyButton.textContent = "Copied!";
+    } catch (_) {
+      copyButton.textContent = "Clipboard unavailable";
+    }
+    setTimeout(() => { copyButton.textContent = "Copy brief text"; }, 1400);
+  };
   const workspaceButton = el("button", "board-btn", "Export workspace");
   workspaceButton.type = "button"; workspaceButton.title = "Download the index, evidence files, pins, notes, and recent searches";
   workspaceButton.onclick = async () => { workspaceButton.disabled = true; workspaceButton.textContent = "Preparing…"; try { await exportWorkspace(); workspaceButton.textContent = "Workspace exported"; } catch (err) { workspaceButton.textContent = err.message || "Export failed"; } finally { setTimeout(() => { workspaceButton.disabled = false; workspaceButton.textContent = "Export workspace"; }, 1800); } };
   const clear = el("button", "board-btn", "Clear board");
   clear.type = "button"; clear.disabled = !cards.length;
   clear.onclick = () => { PINNED = {}; PINNED_ORDER = []; savePinned(); showBoard(); };
-  actions.append(exportButton, workspaceButton, clear); toolbar.append(actions); c.append(toolbar);
+  actions.append(exportButton, copyButton, workspaceButton, clear); toolbar.append(actions); c.append(toolbar);
   if (!cards.length){
     const empty = el("div", "empty");
     empty.append(el("h2", null, "Your board is empty."));
@@ -846,7 +874,30 @@ async function doSearch({pushUrl = false} = {}){
     const r = await api(`${endpoint}?${params}`);
     if (request !== viewRequest) return;
     c.innerHTML = "";
-    c.append(el("div", "crumb", `${r.count} result${r.count===1?"":"s"} for "${q}"`));
+    const crumbRow = el("div", "crumb");
+    crumbRow.append(el("span", null, `${r.count} result${r.count===1?"":"s"} for "${q}"`));
+    if (r.count){
+      const packetButton = el("button", "board-btn", "Export packet");
+      packetButton.type = "button";
+      packetButton.title = "Download these results as a research packet (Markdown brief, BibTeX, CSV, provenance)";
+      packetButton.onclick = async () => {
+        packetButton.disabled = true; packetButton.textContent = "Preparing…";
+        const payload = {query: q, k: 25, mode: $("#searchMode").value};
+        if (side) payload.side = side;
+        if (source) payload.source = source;
+        if (block) payload.block = block;
+        try {
+          await exportPacket(payload);
+          packetButton.textContent = "Packet exported";
+        } catch (err) {
+          packetButton.textContent = err.message || "Export failed";
+        } finally {
+          setTimeout(() => { packetButton.disabled = false; packetButton.textContent = "Export packet"; }, 1800);
+        }
+      };
+      crumbRow.append(packetButton);
+    }
+    c.append(crumbRow);
     if (r.interpreted_filters && Object.keys(r.interpreted_filters).length){
       const filters = Object.entries(r.interpreted_filters)
         .map(([key, value]) => `${key}: ${value}`).join(" · ");

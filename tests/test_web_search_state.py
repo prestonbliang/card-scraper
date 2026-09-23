@@ -31,7 +31,7 @@ def test_search_state_is_shareable_and_restorable():
         'const PINNED_KEY',
         'function pinButton(c)',
         'function showBoard()',
-        'function exportBoard()',
+        'async function exportPacket(payload)',
         'id="mBoard"',
         'const PINNED_ORDER_KEY',
         'function orderedPinned()',
@@ -67,6 +67,8 @@ def test_search_state_is_shareable_and_restorable():
         '/api/workspace/restore',
         'Export workspace',
         'Portable workspace',
+        '/api/packet',
+        'Export research packet',
     ):
         assert marker in html
 
@@ -83,8 +85,9 @@ def test_recent_searches_and_keyboard_shortcuts_are_local_only():
 def test_research_board_is_local_and_exportable():
     html = WEB.read_text(encoding="utf-8")
     assert "localStorage.setItem(PINNED_KEY" in html
-    assert "card-scraper-research-board.md" in html
-    assert "Export cited brief" in html
+    assert "Export research packet" in html
+    assert "Copy brief text" in html
+    assert "card_ids: cards.map(c => c.card_id)" in html
     assert "Affirmative" in html and "Negative" in html
 
 

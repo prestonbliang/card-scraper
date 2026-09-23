@@ -206,6 +206,25 @@ hash validation. Pins for cards that are not present in the restored index are
 reported during preflight and removed rather than leaving broken board cards.
 Keep bundles private when they contain evidence or notes.
 
+### Research packets
+
+A research packet is the shareable counterpart to a workspace bundle: a single
+ZIP built from pinned cards or the top results of a search. It contains a
+Markdown brief grouped by side, a BibTeX bibliography (one entry per card, with
+clearly keyed placeholders when an author or year is missing), a CSV spreadsheet
+for spreadsheets or mail-merge, and a `manifest.json` recording the sources,
+their freshness, and each card's traceability status. The manifest describes
+traceability — never truth — and reminds the reader to check source licenses.
+
+```bash
+python -m cardgraph.cli packet --ids <card_id> [<card_id> ...] --out brief.zip
+python -m cardgraph.cli packet --query "grid expansion permits" -k 12 --side aff --out aff.zip
+```
+
+In the browser: **Export research packet** on the Board exports every pinned
+card; **Export packet** next to search results exports the current query with
+its filters. Both download the same server-built ZIP (`POST /api/packet`).
+
 ```bash
 python -m cardgraph.cli ingest-opendebate \
     --query "data center" --year-min 2021 --event cx --min-duplicates 3 --limit 5000

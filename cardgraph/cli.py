@@ -9,6 +9,8 @@
     python -m cardgraph.cli analyze --owner Greenhill --top 5
     python -m cardgraph.cli analyze --no-llm --json report.json
     python -m cardgraph.cli search "households subsidize industrial load"
+    python -m cardgraph.cli packet --query "grid expansion permits" -k 12 --out packet.zip
+    python -m cardgraph.cli packet --ids <card_id> [<card_id> ...]
     python -m cardgraph.cli stats
     python -m cardgraph.cli policy
     python -m cardgraph.cli workspace export data/card-scraper-workspace.zip
@@ -32,6 +34,7 @@ from .ingest.base import (CaselistArchiveAdapter, GitRepoAdapter,
 from .ingest.policy import (AccessPolicy, AccessRefused, explain_allowlist,
                             source_catalog)
 from .parse.docx_card import UnsupportedFormat, parse_any
+from .packet import PacketError
 from .workspace import (WorkspaceBundleError, bundle_summary, export_bundle,
                          inspect_bundle, restore_bundle)
 
@@ -282,6 +285,49 @@ def cmd_search(args) -> int:
     return 0
 
 
+def cmd_packet(args) -> int:
+    from .packet import PacketError, write_packet
+
+    if args.year_min is not None and args.year_max is not None \
+            and args.year_min > args.year_max:
+        print("year-min must not exceed year-max", file=sys.stderr)
+        return 2
+    if args.ids and args.query:
+        print("pass either --ids or a query, not both", file=sys.stderr)
+        return 2
+    store = Store(args.db)
+    try:
+        kwargs = {"query": args.query} if args.query else {"card_ids": args.ids}
+        for option in ("side", "author", "block", "source"):
+            value = getattr(args, option, None)
+            if value:
+                kwargs[option] = value
+        if args.year_min is not None:
+            kwargs["year_min"] = args.year_min
+        if args.year_max is not None:
+            kwargs["year_max"] = args.year_max
+        if args.min_read_ratio is not None:
+            kwargs["min_read_ratio"] = args.min_read_ratio
+        if args.query:
+            kwargs["k"] = args.k
+            kwargs["smart"] = args.smart
+            kwargs["mode"] = args.mode
+        filename, manifest = write_packet(store, args.out, **kwargs)
+    except PacketError as exc:
+        print(f"packet error: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        store.close()
+    print(f"wrote {args.out} ({filename})")
+    print(f"  cards: {manifest['card_count']}")
+    for name, count in manifest["evidence_status_counts"].items():
+        print(f"  {name}: {count}")
+    for source_id, source in manifest["sources"].items():
+        fresh = source["freshness"] + (" (refresh failed)" if source["refresh_failed"] else "")
+        print(f"  source {source_id}: {len(source['cards'])} card(s), {fresh}")
+    return 0
+
+
 def cmd_stats(args) -> int:
     store = Store(args.db)
     for k, v in store.stats().items():
@@ -432,6 +478,22 @@ def main(argv: list[str] | None = None) -> int:
     st = sub.add_parser("stats")
     st.set_defaults(func=cmd_stats)
 
+    pk = sub.add_parser("packet", help="export selected cards as a shareable research packet (ZIP)")
+    pk.add_argument("--ids", nargs="+", help="card ids (from search results or the board)")
+    pk.add_argument("--query", help="use the top-k search results as the packet contents")
+    pk.add_argument("-k", type=_positive_int, default=10)
+    pk.add_argument("--out", default="card-scraper-packet.zip", help="destination .zip path")
+    pk.add_argument("--side", choices=["aff", "neg", "both", "unknown"])
+    pk.add_argument("--author")
+    pk.add_argument("--year-min", type=_year, dest="year_min")
+    pk.add_argument("--year-max", type=_year, dest="year_max")
+    pk.add_argument("--block")
+    pk.add_argument("--source")
+    pk.add_argument("--min-read-ratio", type=_ratio, dest="min_read_ratio")
+    pk.add_argument("--smart", action="store_true")
+    pk.add_argument("--mode", choices=["strict", "balanced", "explore"], default="balanced")
+    pk.set_defaults(func=cmd_packet)
+
     po = sub.add_parser("policy")
     po.set_defaults(func=cmd_policy)
 
@@ -463,6 +525,9 @@ def main(argv: list[str] | None = None) -> int:
         return args.func(args)
     except WorkspaceBundleError as exc:
         print(f"workspace error: {exc}", file=sys.stderr)
+        return 2
+    except PacketError as exc:
+        print(f"packet error: {exc}", file=sys.stderr)
         return 2
     except BrokenPipeError:
         # piping into `head` is normal usage, not an error

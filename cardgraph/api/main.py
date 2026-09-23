@@ -30,6 +30,7 @@ from ..index.store import Store
 from ..ingest.base import OnlineEvidenceAdapter
 from ..ingest.policy import AccessRefused, source_catalog
 from ..parse.docx_card import UnsupportedFormat, parse_any
+from ..packet import PacketError, build_packet
 from ..workspace import (MAX_TOTAL_BYTES, WorkspaceBundleError, bundle_summary,
                          export_bundle, inspect_bundle, restore_bundle)
 
@@ -51,6 +52,20 @@ class IngestRequest(BaseModel):
 class WorkspaceExportRequest(BaseModel):
     browser_state: dict | None = None
     include_corpus: bool = True
+
+
+class PacketRequest(BaseModel):
+    card_ids: list[str] = Field(default_factory=list, max_length=500)
+    query: str | None = Field(default=None, max_length=500)
+    k: int = Field(default=10, ge=1, le=500)
+    side: str | None = Field(default=None, pattern="^(aff|neg|both|unknown)$")
+    author: str | None = Field(default=None, max_length=200)
+    year_min: int | None = Field(default=None, ge=1900, le=2200)
+    year_max: int | None = Field(default=None, ge=1900, le=2200)
+    block: str | None = Field(default=None, max_length=200)
+    min_read_ratio: float | None = Field(default=None, ge=0.0, le=1.0)
+    source: str | None = Field(default=None, max_length=300)
+    mode: str = Field(default="balanced", pattern="^(strict|balanced|explore)$")
 
 
 def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
@@ -112,6 +127,38 @@ def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
         background_tasks.add_task(os.remove, path)
         return FileResponse(path, media_type="application/zip",
                             filename="card-scraper-workspace.zip")
+
+    @app.post("/api/packet")
+    def packet(request: PacketRequest, background_tasks: BackgroundTasks) -> FileResponse:
+        """Download a research packet ZIP for pinned cards or a search query."""
+        if request.year_min is not None and request.year_max is not None \
+                and request.year_min > request.year_max:
+            raise HTTPException(422, "year_min must not exceed year_max")
+        if request.card_ids and request.query:
+            raise HTTPException(422, "pass card_ids or a query, not both")
+        kwargs = {"query": request.query} if request.query else \
+            {"card_ids": request.card_ids}
+        for option in ("side", "author", "block", "source", "mode"):
+            value = getattr(request, option)
+            if value:
+                kwargs[option] = value
+        if request.year_min is not None:
+            kwargs["year_min"] = request.year_min
+        if request.year_max is not None:
+            kwargs["year_max"] = request.year_max
+        if request.min_read_ratio is not None:
+            kwargs["min_read_ratio"] = request.min_read_ratio
+        if request.query:
+            kwargs["k"] = request.k
+        try:
+            filename, payload, _manifest = build_packet(store, **kwargs)
+        except PacketError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        fd, path = tempfile.mkstemp(prefix="card-scraper-packet-", suffix=".zip")
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+        background_tasks.add_task(os.remove, path)
+        return FileResponse(path, media_type="application/zip", filename=filename)
 
     @app.post("/api/workspace/inspect")
     async def workspace_inspect(request: Request) -> dict:
@@ -386,8 +433,14 @@ def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
         with jobs_lock:
             if request.replace_source_id:
                 existing_id = active_refreshes.get(request.replace_source_id)
-                if existing_id and existing_id in jobs:
-                    return public_job_view(jobs[existing_id])
+                existing = jobs.get(existing_id) if existing_id else None
+                # Coalesce only onto a job that is still running. A failed or
+                # cancelled refresh lingers in this map until its worker thread
+                # finishes durable bookkeeping; queuing behind that corpse would
+                # make the new request report the dead job's terminal state.
+                if existing and existing.get("state") in {
+                        "queued", "discovering", "importing", "cancelling"}:
+                    return public_job_view(existing)
                 active_refreshes[request.replace_source_id] = job_id
             jobs[job_id] = job
         store.save_ingest_job(job)

@@ -317,6 +317,77 @@ def test_multi_file_refresh_is_atomic(tmp_path, monkeypatch):
         assert client.get("/api/search?q=new+second").json()["count"] == 1
 
 
+def test_refresh_after_failure_does_not_coalesce_onto_dead_job(tmp_path, monkeypatch):
+    """A retry requested right after a failed refresh must start a new job.
+
+    The failed worker lingers in the coalescing map while it finishes durable
+    bookkeeping; queuing behind that terminal job would report its old failure
+    instead of running the retry (CI-only timing made this visible).
+    """
+    import cardgraph.api.main as api_main
+
+    db = tmp_path / "retry.db"
+    seed = Store(str(db))
+    seed.add_source(Source(
+        source_id="release-old", path="old.docx", title="Release old",
+        origin="online", license="fixture", url="https://openev.debatecoaches.org/release/",
+        fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), card_count=1,
+    ))
+    seed.add_cards([Card(
+        tag="Old evidence", cite=Cite(raw="Old 2025"), body="Old evidence. " * 8,
+        read_text="Old evidence.", source_id="release-old", source_path="old.docx", ordinal=0,
+    )])
+    seed.close()
+
+    retry_source = Source(
+        source_id="release-retry", path="retry.docx", title="Release retry",
+        origin="online", license="fixture", url="https://openev.debatecoaches.org/retry.docx",
+    )
+
+    class RetryAdapter:
+        def __init__(self, **_kwargs):
+            pass
+
+        def acquire(self, limit=None):
+            time.sleep(0.002)  # widen the terminal-job window like CI disks do
+            return [Acquired(path="retry.docx", source=retry_source)]
+
+    monkeypatch.setattr(api_main, "OnlineEvidenceAdapter", RetryAdapter)
+    calls = {"count": 0, "fail_first": True}
+    retry_card = Card(tag="New retry", cite=Cite(raw="Retry 2026"),
+                      body="New retry. " * 8, read_text="New retry.",
+                      source_id=retry_source.source_id, source_path="retry.docx", ordinal=0)
+
+    def parse(path, source_id):
+        calls["count"] += 1
+        if calls["fail_first"] and calls["count"] == 1:
+            raise RuntimeError("first file is corrupt")
+        return [retry_card], OutlineNode(
+            title=source_id, kind=NodeKind.POCKET, source_id=source_id), object()
+
+    monkeypatch.setattr(api_main, "parse_any", parse)
+    with TestClient(api_main.create_app(str(db))) as client:
+        first = client.post("/api/sources/release-old/refresh").json()
+        for _ in range(100):
+            status = client.get(f"/api/ingest/{first['job_id']}").json()
+            if status["state"] in {"failed", "completed"}:
+                break
+            time.sleep(0.01)
+        assert status["state"] == "failed"
+
+        calls["fail_first"] = False
+        retry = client.post("/api/sources/release-old/refresh").json()
+        assert retry["job_id"] != first["job_id"], (
+            "retry was coalesced onto the already-failed job")
+        for _ in range(100):
+            status = client.get(f"/api/ingest/{retry['job_id']}").json()
+            if status["state"] in {"failed", "completed"}:
+                break
+            time.sleep(0.01)
+        assert status["state"] == "completed", status
+        assert client.get("/api/search?q=new+retry").json()["count"] == 1
+
+
 def test_api_search_and_card_preserve_provenance(tmp_path):
     with TestClient(_app(tmp_path)) as client:
         result = client.get("/api/search", params={"q": "grid costs"})
