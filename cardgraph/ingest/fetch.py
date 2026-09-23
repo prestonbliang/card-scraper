@@ -24,6 +24,7 @@ most of the open corpora anyway.
 from __future__ import annotations
 
 import os
+import tempfile
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
@@ -166,6 +167,19 @@ class Fetcher:
             raise FetchLimitExceeded(
                 f"response exceeds {MAX_RESPONSE_BYTES // (1024 * 1024)} MiB limit")
         os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
-        with open(dest, "wb") as fh:
-            fh.write(payload)
-        return dest
+        temporary = None
+        try:
+            fd, temporary = tempfile.mkstemp(
+                prefix=".card-scraper-download-",
+                dir=os.path.dirname(dest) or ".",
+            )
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(temporary, dest)
+            temporary = None
+            return dest
+        finally:
+            if temporary and os.path.exists(temporary):
+                os.remove(temporary)

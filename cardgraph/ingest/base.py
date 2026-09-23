@@ -12,6 +12,7 @@ import hashlib
 import os
 import posixpath
 import subprocess
+import tempfile
 import zipfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -291,16 +292,29 @@ class HttpIndexAdapter(SourceAdapter):
                     break
                 destination = os.path.join(archive_dir, "files", *safe.split("/"))
                 os.makedirs(os.path.dirname(destination), exist_ok=True)
-                with archive.open(member) as src, open(destination, "wb") as dst:
-                    written = 0
-                    while True:
-                        chunk = src.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        written += len(chunk)
-                        if written > self.MAX_MEMBER_BYTES:
-                            raise ValueError("archive member exceeds size limit")
-                        dst.write(chunk)
+                temporary = None
+                try:
+                    fd, temporary = tempfile.mkstemp(
+                        prefix=".card-scraper-member-",
+                        dir=os.path.dirname(destination),
+                    )
+                    with archive.open(member) as src, os.fdopen(fd, "wb") as dst:
+                        written = 0
+                        while True:
+                            chunk = src.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            written += len(chunk)
+                            if written > self.MAX_MEMBER_BYTES:
+                                raise ValueError("archive member exceeds size limit")
+                            dst.write(chunk)
+                        dst.flush()
+                        os.fsync(dst.fileno())
+                    os.replace(temporary, destination)
+                    temporary = None
+                finally:
+                    if temporary and os.path.exists(temporary):
+                        os.remove(temporary)
                 total_bytes += written
                 member_url = f"{url}#{safe}"
                 out.append(self._source(

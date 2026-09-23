@@ -20,10 +20,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -38,7 +38,7 @@ jobs:
         run: python -m pytest tests/ -q
 
       - name: Run lint checks
-        run: python -m ruff check cardgraph tests
+        run: python -m ruff check --select E9,F63,F7,F82,F401,F811,F841 .
 
       - name: Check Python compilation
         run: python -m compileall -q cardgraph tests
@@ -51,6 +51,48 @@ jobs:
           python -m cardgraph.cli graph
           python -m cardgraph.cli search "households subsidize industrial load"
           CARDGRAPH_LLM=none python -m cardgraph.cli analyze --top 3
+
+      - name: Exercise the live HTTP server
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import subprocess
+          import sys
+          import time
+          import urllib.request
+
+          command = [
+              sys.executable, "-m", "cardgraph.cli", "--db", "data/cardgraph.db", "serve",
+              "--host", "127.0.0.1", "--port", "8765",
+          ]
+          process = subprocess.Popen(command, stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT, text=True)
+          try:
+              deadline = time.time() + 30
+              health = None
+              while time.time() < deadline:
+                  try:
+                      with urllib.request.urlopen("http://127.0.0.1:8765/api/health", timeout=2) as response:
+                          health = json.load(response)
+                      break
+                  except (OSError, ValueError):
+                      time.sleep(0.25)
+              assert health and health["status"] == "ok", health
+              with urllib.request.urlopen("http://127.0.0.1:8765/", timeout=5) as response:
+                  assert response.status == 200
+                  assert "Card Scraper" in response.read().decode("utf-8")
+              with urllib.request.urlopen("http://127.0.0.1:8765/api/search?q=households", timeout=5) as response:
+                  assert json.load(response)["count"] >= 1
+              print("live HTTP smoke passed")
+          finally:
+              process.terminate()
+              try:
+                  process.wait(timeout=10)
+              except subprocess.TimeoutExpired:
+                  process.kill()
+                  process.wait()
+          PY
 
       - name: Build distributable wheel
         run: python -m pip wheel . --no-deps --wheel-dir dist

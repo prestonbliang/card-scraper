@@ -27,6 +27,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, asdict
@@ -37,6 +38,23 @@ DEFAULT_MODEL = os.environ.get("CARDGRAPH_MODEL", "claude-sonnet-4-6")
 # Published per-million-token prices are a moving target and belong in config,
 # not in a constant that silently goes stale. The ledger reports token counts
 # unconditionally and dollars only when a price is configured.
+def _write_json_atomic(path: str, payload: dict[str, Any]) -> None:
+    """Write cache data without leaving a parseable-looking partial file."""
+    directory = os.path.dirname(path) or "."
+    temporary = None
+    try:
+        fd, temporary = tempfile.mkstemp(prefix=".card-scraper-cache-", dir=directory)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.remove(temporary)
+
+
 PRICES: dict[str, tuple[float, float]] = {}
 if os.environ.get("CARDGRAPH_PRICE_IN") and os.environ.get("CARDGRAPH_PRICE_OUT"):
     PRICES[DEFAULT_MODEL] = (float(os.environ["CARDGRAPH_PRICE_IN"]),
@@ -249,11 +267,20 @@ class StubProvider(Provider):
         k = self.key(system, user, schema)
         path = os.path.join(self.dir, f"{k}.json")
         if os.path.exists(path):
-            with open(path) as fh:
-                d = json.load(fh)
-            return LLMResponse(text=d["text"], usage=Usage(**d.get("usage", {})),
-                               parsed=d.get("parsed"), from_cache=True,
-                               provider=self.name)
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    d = json.load(fh)
+                return LLMResponse(text=d["text"], usage=Usage(**d.get("usage", {})),
+                                   parsed=d.get("parsed"), from_cache=True,
+                                   provider=self.name)
+            except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+                # A killed recording process can leave a truncated cassette.
+                # Treat it as a cache miss so a configured live provider can
+                # repair it instead of failing every future analysis.
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
         if self.record_with is None:
             raise LLMUnavailable(
                 f"no cassette for key {k}. Re-record with "
@@ -261,10 +288,11 @@ class StubProvider(Provider):
         resp = self.record_with.complete(system, user, schema=schema,
                                          max_tokens=max_tokens,
                                          temperature=temperature)
-        with open(path, "w") as fh:
-            json.dump({"text": resp.text, "parsed": resp.parsed,
-                       "usage": asdict(resp.usage),
-                       "_prompt_preview": user[:400]}, fh, indent=2)
+        _write_json_atomic(path, {
+            "text": resp.text, "parsed": resp.parsed,
+            "usage": asdict(resp.usage),
+            "_prompt_preview": user[:400],
+        })
         return resp
 
 
@@ -454,10 +482,20 @@ class LLM:
         if self.cache_dir:
             cp = self._cache_path(system, user, schema)
             if os.path.exists(cp):
-                with open(cp) as fh:
-                    payload = json.load(fh)
-                self.ledger.cache_hits += 1
-                return payload["parsed"]
+                try:
+                    with open(cp, encoding="utf-8") as fh:
+                        payload = json.load(fh)
+                    parsed = payload["parsed"]
+                except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+                    # Cache corruption must never make evidence analysis
+                    # impossible; discard only the bad artifact and recompute.
+                    try:
+                        os.remove(cp)
+                    except OSError:
+                        pass
+                else:
+                    self.ledger.cache_hits += 1
+                    return parsed
 
         last_err: str = ""
         prompt = user
@@ -489,9 +527,9 @@ class LLM:
                 value, errs = _salvage(value, schema, salvage_key, errs)
             if not errs:
                 if self.cache_dir:
-                    with open(self._cache_path(system, user, schema), "w") as fh:
-                        json.dump({"parsed": value,
-                                   "usage": asdict(resp.usage)}, fh)
+                    _write_json_atomic(self._cache_path(system, user, schema), {
+                        "parsed": value, "usage": asdict(resp.usage),
+                    })
                 return value
             last_err = "; ".join(errs[:6])
             prompt = (f"{user}\n\nYour previous reply failed validation:\n"

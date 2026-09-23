@@ -33,6 +33,24 @@ def _app(tmp_path):
     return create_app(db)
 
 
+def test_restart_marks_interrupted_ingest_jobs_failed(tmp_path):
+    db = tmp_path / "restart.db"
+    store = Store(str(db))
+    store.save_ingest_job({
+        "job_id": "stuck", "url": "https://example.net/cases.zip",
+        "license": "fixture", "state": "importing", "processed": 1,
+        "total": 3, "imported": 0, "cards_added": 0, "skipped": 0,
+        "failed": 0, "details": [], "error": None, "created_at": time.time(),
+    })
+    store.close()
+
+    with TestClient(create_app(str(db))) as client:
+        jobs = client.get("/api/ingest").json()["jobs"]
+        assert jobs[0]["job_id"] == "stuck"
+        assert jobs[0]["state"] == "failed"
+        assert jobs[0]["error"] == "application stopped before this import completed"
+
+
 def test_api_validates_search_inputs_and_year_ranges(tmp_path):
     with TestClient(_app(tmp_path)) as client:
         response = client.post("/api/ingest", json={"url": "https://example.net/cases.zip"})
@@ -185,6 +203,45 @@ def test_source_health_marks_stale_and_failed_refresh_preserves_cards(tmp_path, 
         assert client.get("/api/search?q=known+good").json()["count"] == 1
 
 
+def test_empty_refresh_preserves_last_known_good_source(tmp_path, monkeypatch):
+    import cardgraph.api.main as api_main
+
+    db = tmp_path / "empty-refresh.db"
+    seed = Store(str(db))
+    seed.add_source(Source(
+        source_id="release", path="release.docx", title="Release",
+        origin="online", license="fixture", url="https://openev.debatecoaches.org/release/",
+        fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), card_count=1,
+    ))
+    seed.add_cards([Card(
+        tag="Known good", cite=Cite(raw="Example 2026"),
+        body="Known good evidence. " * 8, read_text="Known good evidence.",
+        source_id="release", source_path="release.docx", ordinal=0,
+    )])
+    seed.close()
+
+    class EmptyAdapter:
+        def __init__(self, **_kwargs):
+            pass
+
+        def acquire(self, limit=None):
+            return []
+
+    monkeypatch.setattr(api_main, "OnlineEvidenceAdapter", EmptyAdapter)
+    with TestClient(api_main.create_app(str(db))) as client:
+        queued = client.post("/api/sources/release/refresh")
+        for _ in range(50):
+            status = client.get(f"/api/ingest/{queued.json()['job_id']}").json()
+            if status["state"] == "failed":
+                break
+            time.sleep(0.01)
+        assert status["state"] == "failed"
+        assert status["error"] == "refresh failed; last-known-good evidence was retained"
+        assert client.get("/api/search?q=known+good").json()["count"] == 1
+        health = client.get("/api/sources").json()["sources"][0]["health"]
+        assert health["state"] == "refresh-failed"
+
+
 def test_multi_file_refresh_is_atomic(tmp_path, monkeypatch):
     import cardgraph.api.main as api_main
 
@@ -308,3 +365,64 @@ def test_api_smart_search_returns_transparent_variants_and_provenance(tmp_path):
         assert client.get(
             "/api/smart-search?q=grid&year_min=2027&year_max=2020"
         ).status_code == 422
+
+
+def test_health_reports_ready_index_and_corrupt_analysis_is_recoverable(tmp_path):
+    with TestClient(_app(tmp_path)) as client:
+        health = client.get("/api/health")
+        assert health.status_code == 200
+        assert health.json()["status"] == "ok"
+        assert health.json()["search_index"] == "ready"
+        assert health.json()["stats"]["cards"] == 1
+
+        (tmp_path / "analysis.json").write_text("{not-json", encoding="utf-8")
+        report = client.get("/api/analysis")
+        assert report.status_code == 200
+        assert report.json()["available"] is False
+        assert "unreadable" in report.json()["error"]
+
+
+def test_unexpected_worker_failure_is_reported_instead_of_sticking(tmp_path, monkeypatch):
+    import cardgraph.api.main as api_main
+
+    source = Source(
+        source_id="replacement", path="replacement.docx", title="Replacement",
+        origin="online", license="fixture", url="https://openev.debatecoaches.org/replacement/",
+    )
+
+    class Adapter:
+        def __init__(self, **_kwargs):
+            pass
+
+        def acquire(self, limit=None):
+            return [Acquired(path=source.path, source=source)]
+
+    card = Card(
+        tag="Replacement card", cite=Cite(raw="Example 2027"),
+        body="Replacement card. " * 8, read_text="Replacement card.",
+        source_id=source.source_id, source_path=source.path, ordinal=0,
+    )
+    monkeypatch.setattr(api_main, "OnlineEvidenceAdapter", Adapter)
+    monkeypatch.setattr(
+        api_main, "parse_any",
+        lambda *_args: ([card], OutlineNode(
+            title="Replacement", kind=NodeKind.POCKET, source_id=source.source_id), object()),
+    )
+    original_replace = Store.replace_source
+    monkeypatch.setattr(
+        Store, "replace_source",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("disk transaction failed")),
+    )
+    with TestClient(_app(tmp_path)) as client:
+        queued = client.post("/api/sources/public/refresh")
+        job_id = queued.json()["job_id"]
+        for _ in range(50):
+            status = client.get(f"/api/ingest/{job_id}").json()
+            if status["state"] == "failed":
+                break
+            time.sleep(0.01)
+        assert status["state"] == "failed"
+        assert status["error"] == "import worker failed: disk transaction failed"
+        persisted = client.get(f"/api/ingest/{job_id}").json()
+        assert persisted["state"] == "failed"
+    monkeypatch.setattr(Store, "replace_source", original_replace)

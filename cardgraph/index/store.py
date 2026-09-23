@@ -189,6 +189,26 @@ class Store:
                  job.get("created_at", now), now),
             )
 
+    def recover_interrupted_jobs(self) -> int:
+        """Mark jobs that cannot resume after an application restart.
+
+        Worker threads are intentionally in-process, so a process exit leaves
+        queued/importing rows with no worker able to finish them. Reporting
+        those jobs as failed is safer than showing an infinite spinner or
+        allowing a user to mistake partial evidence for a completed import.
+        """
+        import time
+        now = time.time()
+        message = "application stopped before this import completed"
+        with self.tx() as c:
+            cursor = c.execute(
+                """UPDATE ingest_jobs
+                   SET state='failed', error=?, updated_at=?
+                   WHERE state IN ('queued', 'discovering', 'importing', 'cancelling')""",
+                (message, now),
+            )
+            return cursor.rowcount
+
     def ingest_job(self, job_id: str) -> dict | None:
         row = self.conn.execute(
             "SELECT * FROM ingest_jobs WHERE job_id=?", (job_id,)

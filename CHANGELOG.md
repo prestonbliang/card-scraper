@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Recover crashed or interrupted background imports as durable failed jobs.
+- Make source downloads, ZIP extraction, and analysis/LLM caches atomic and self-healing.
+- Add `/api/health` readiness diagnostics and coalesce duplicate source refreshes.
+- Preserve last-known-good evidence when refreshes fail or return no supported files.
+
 ## 0.2.0 — Public beta
 
 Card Scraper is now a local-first debate research application rather than a

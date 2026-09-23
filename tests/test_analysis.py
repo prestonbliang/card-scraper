@@ -515,6 +515,18 @@ class TestLLMPlumbing:
         assert llm2.json("s", "u", schema) == {"x": "a"}
         assert len(prov.prompts) == 1
 
+    def test_corrupt_disk_cache_is_discarded_and_recomputed(self):
+        d = tempfile.mkdtemp()
+        prov = ScriptedProvider([{"x": "recovered"}])
+        schema = {"type": "object", "required": ["x"],
+                  "properties": {"x": {"type": "string"}}}
+        llm = LLM(provider=prov, cache_dir=d)
+        cache_path = llm._cache_path("s", "u", schema)
+        with open(cache_path, "w", encoding="utf-8") as fh:
+            fh.write("{truncated")
+        assert llm.json("s", "u", schema) == {"x": "recovered"}
+        assert len(prov.prompts) == 1
+
     def test_stub_provider_records_then_replays(self):
         d = tempfile.mkdtemp()
         live = ScriptedProvider([{"x": 1}])

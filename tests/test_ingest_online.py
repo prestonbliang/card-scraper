@@ -10,7 +10,7 @@ import zipfile
 import pytest
 
 from cardgraph.ingest.base import HttpIndexAdapter
-from cardgraph.ingest.fetch import FetchResult
+from cardgraph.ingest.fetch import FetchResult, Fetcher
 from cardgraph.ingest.policy import AccessPolicy, AccessRefused, source_catalog
 
 
@@ -83,6 +83,19 @@ def test_discover_refuses_unknown_direct_file_host(tmp_path):
 
     with pytest.raises(AccessRefused):
         a.discover()
+
+
+def test_binary_download_replaces_destination_atomically(tmp_path):
+    class FixtureFetcher(Fetcher):
+        def get(self, url):
+            return FetchResult(url=url, status=200, content=b"new complete payload")
+
+    destination = tmp_path / "release.docx"
+    destination.write_bytes(b"old known-good payload")
+    fetcher = FixtureFetcher(AccessPolicy(respect_robots=False))
+    assert fetcher.download("https://openev.debatecoaches.org/release.docx", str(destination)) == str(destination)
+    assert destination.read_bytes() == b"new complete payload"
+    assert not list(tmp_path.glob(".card-scraper-download-*"))
 
 
 def test_zip_extraction_skips_traversal_and_non_debate_files(tmp_path):

@@ -55,6 +55,7 @@ class WorkspaceExportRequest(BaseModel):
 
 def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
     store = Store(db_path)
+    store.recover_interrupted_jobs()
     engine = SearchEngine(store)
 
     @asynccontextmanager
@@ -74,6 +75,22 @@ def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
         CORSMiddleware, allow_origins=["http://127.0.0.1:8000", "http://localhost:8000"],
         allow_methods=["GET", "POST", "DELETE"], allow_headers=["*"],
     )
+
+    @app.get("/api/health")
+    def health() -> dict:
+        """Return a lightweight readiness signal for local launch scripts."""
+        try:
+            stats = store.stats()
+            database = "ok"
+        except Exception:  # noqa: BLE001
+            stats = None
+            database = "error"
+        return {
+            "status": "ok" if database == "ok" else "error",
+            "database": database,
+            "search_index": "ready" if engine._built else "starting",
+            "stats": stats,
+        }
 
     @app.get("/api/stats")
     def stats() -> dict:
@@ -174,9 +191,10 @@ def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
     # cannot freeze the local application. Each job owns a separate SQLite
     # connection; the search engine sees the new cards through card_revision().
     jobs: dict[str, dict] = {}
+    active_refreshes: dict[str, str] = {}
     jobs_lock = threading.Lock()
 
-    def public_job(job_id: str, request: IngestRequest) -> None:
+    def _public_job(job_id: str, request: IngestRequest) -> None:
         with jobs_lock:
             job = jobs[job_id]
             job["state"] = "discovering"
@@ -210,6 +228,18 @@ def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
                 job.update(state="importing", total=len(acquired))
             worker_store.save_ingest_job(job)
 
+            if job.get("replace_source_id") and not acquired:
+                error = "refresh discovered no supported files"
+                worker_store.mark_source_refresh_failed(
+                    job["replace_source_id"], error)
+                with jobs_lock:
+                    job["failed"] += 1
+                    job["details"].append(error)
+                    job["state"] = "failed"
+                    job["error"] = "refresh failed; last-known-good evidence was retained"
+                worker_store.save_ingest_job(job)
+                return
+
             if job.get("replace_source_id"):
                 # Stage every replacement before touching the live index. A
                 # source can expand to several files; parsing one successfully
@@ -223,7 +253,7 @@ def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
                             return
                     try:
                         cards, root, _report = parse_any(item.path, item.source.source_id)
-                    except (UnsupportedFormat, Exception) as exc:  # noqa: BLE001
+                    except Exception as exc:  # noqa: BLE001
                         error = f"{os.path.basename(item.path)}: {exc}"
                         with jobs_lock:
                             job["failed"] += 1
@@ -305,6 +335,40 @@ def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
         finally:
             worker_store.close()
 
+    def public_job(job_id: str, request: IngestRequest) -> None:
+        """Convert unexpected worker failures into a durable failed job.
+
+        The normal discovery/parser paths report their own errors, but storage,
+        transaction, or third-party failures can still escape those branches.
+        A daemon thread has no caller to receive such an exception; without this
+        guard the UI would show an import stuck in ``importing`` until restart.
+        """
+        try:
+            _public_job(job_id, request)
+        except Exception as exc:  # noqa: BLE001
+            error = f"import worker failed: {exc}"
+            with jobs_lock:
+                job = jobs.get(job_id)
+                if job:
+                    job.update(state="failed", error=error)
+            try:
+                recovery_store = Store(db_path)
+                try:
+                    if job:
+                        recovery_store.save_ingest_job(job)
+                finally:
+                    recovery_store.close()
+            except Exception:
+                # The original failure is already reflected in memory; avoid
+                # hiding it behind a second storage exception during recovery.
+                pass
+        finally:
+            with jobs_lock:
+                if jobs.get(job_id, {}).get("replace_source_id"):
+                    source_id = jobs[job_id]["replace_source_id"]
+                    if active_refreshes.get(source_id) == job_id:
+                        del active_refreshes[source_id]
+
     def public_job_view(job: dict) -> dict:
         return {key: value for key, value in job.items() if key != "cancel"}
 
@@ -320,6 +384,11 @@ def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
             "cancel": threading.Event(),
         }
         with jobs_lock:
+            if request.replace_source_id:
+                existing_id = active_refreshes.get(request.replace_source_id)
+                if existing_id and existing_id in jobs:
+                    return public_job_view(jobs[existing_id])
+                active_refreshes[request.replace_source_id] = job_id
             jobs[job_id] = job
         store.save_ingest_job(job)
         threading.Thread(
@@ -560,8 +629,15 @@ def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
             return {"available": False,
                     "hint": "run `cardgraph analyze --json data/analysis.json`, "
                             "or POST /api/analysis/run"}
-        with open(analysis_path) as fh:
-            payload = json.load(fh)
+        try:
+            with open(analysis_path, encoding="utf-8") as fh:
+                payload = json.load(fh)
+            if not isinstance(payload, dict):
+                raise ValueError("analysis report must be a JSON object")
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            return {"available": False,
+                    "error": f"saved analysis report is unreadable: {exc}",
+                    "hint": "run POST /api/analysis/run to replace it"}
         payload["available"] = True
         payload["generated_at"] = os.path.getmtime(analysis_path)
         return payload
@@ -574,8 +650,21 @@ def create_app(db_path: str = "data/cardgraph.db") -> FastAPI:
         report = analyze(store, max_positions=top, use_llm=llm,
                          generate_blocks=blocks, engine=engine)
         payload = report.to_dict()
-        with open(analysis_path, "w") as fh:
-            json.dump(payload, fh, indent=2)
+        temporary = None
+        try:
+            fd, temporary = tempfile.mkstemp(
+                prefix=".card-scraper-analysis-", suffix=".json",
+                dir=os.path.dirname(analysis_path) or ".",
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(temporary, analysis_path)
+            temporary = None
+        finally:
+            if temporary and os.path.exists(temporary):
+                os.remove(temporary)
         payload["available"] = True
         return payload
 
